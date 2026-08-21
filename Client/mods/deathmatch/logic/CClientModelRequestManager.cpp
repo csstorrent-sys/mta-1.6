@@ -25,6 +25,8 @@ namespace
     constexpr size_t SOMNIS_MAX_IMMEDIATE_LOADED_REQUESTS_PER_FRAME = 8;
     constexpr size_t SOMNIS_MAX_MODEL_COMPLETIONS_PER_PULSE = 8;
     constexpr size_t SOMNIS_MAX_MODEL_RETRIES_PER_PULSE = 16;
+    constexpr unsigned long SOMNIS_BASE_MODEL_RETRY_MS = 2000;
+    constexpr unsigned long SOMNIS_MAX_MODEL_RETRY_MS = 8000;
 
     size_t GetSomnisCompletionBudget()
     {
@@ -50,6 +52,25 @@ namespace
         if (fFPS > 0.0f && fFPS < 40.0f)
             return 8;
         return SOMNIS_MAX_MODEL_RETRIES_PER_PULSE;
+    }
+
+    TIMEUS GetSomnisPulseTimeBudgetUs()
+    {
+        if (!g_pGame)
+            return 4000;
+
+        const float fFPS = g_pGame->GetFPS();
+        if (fFPS > 0.0f && fFPS < 25.0f)
+            return 1500;
+        if (fFPS > 0.0f && fFPS < 40.0f)
+            return 2500;
+        return 4000;
+    }
+
+    unsigned long GetSomnisRetryDelayMs(unsigned char ucRetryCount)
+    {
+        const unsigned int uiShift = std::min<unsigned int>(ucRetryCount, 2U);
+        return std::min<unsigned long>(SOMNIS_BASE_MODEL_RETRY_MS << uiShift, SOMNIS_MAX_MODEL_RETRY_MS);
     }
 
     size_t GetSomnisImmediateBudget()
@@ -212,6 +233,7 @@ bool CClientModelRequestManager::Request(unsigned short usModelID, CClientEntity
                     // A large entity packet can reference many models that are already resident.
                     // Queue the excess instead of creating every native entity on this one frame.
                     pEntry->pModel = pInfo;
+                    pEntry->ucRetryCount = 0;
                     pEntry->requestTimer.SetMaxIncrement(500);
                     pEntry->requestTimer.Reset();
                     pInfo->ModelAddRef(NON_BLOCKING, "CClientModelRequestManager::Request deferred loaded");
@@ -222,6 +244,7 @@ bool CClientModelRequestManager::Request(unsigned short usModelID, CClientEntity
                     // If not loaded. Replace the model we're going to load.
                     // Also remember that we requested it now.
                     pEntry->pModel = pInfo;
+                    pEntry->ucRetryCount = 0;
                     pEntry->requestTimer.Reset();
 
                     // Start loading the new model.
@@ -250,6 +273,7 @@ bool CClientModelRequestManager::Request(unsigned short usModelID, CClientEntity
             pEntry = new SClientModelRequest;
             pEntry->pModel = pInfo;
             pEntry->pEntity = pRequester;
+            pEntry->ucRetryCount = 0;
             pEntry->requestTimer.SetMaxIncrement(500);
             pEntry->requestTimer.Reset();
             m_Requests.push_back(pEntry);
@@ -307,6 +331,8 @@ void CClientModelRequestManager::DoPulse()
 
         const size_t uiCompletionBudget = GetSomnisCompletionBudget();
         const size_t uiRetryBudget = GetSomnisRetryBudget();
+        const TIMEUS uiTimeBudgetUs = GetSomnisPulseTimeBudgetUs();
+        const TIMEUS uiPulseStartUs = GetTimeUs();
         size_t       uiCompletedThisPulse = 0;
         size_t       uiRetriedThisPulse = 0;
 
@@ -337,7 +363,7 @@ void CClientModelRequestManager::DoPulse()
                 entryCopy.pModel->RemoveRef();
 
                 ++uiCompletedThisPulse;
-                if (uiCompletedThisPulse >= uiCompletionBudget)
+                if (uiCompletedThisPulse >= uiCompletionBudget || GetTimeUs() - uiPulseStartUs >= uiTimeBudgetUs)
                     break;
 
                 // Restart loop because m_Requests may have been changed
@@ -345,22 +371,21 @@ void CClientModelRequestManager::DoPulse()
             }
             else
             {
-                // Been more than 2 seconds since we requested it? Request it again.
-                if (pEntry->requestTimer.Get() > 2000 && uiRetriedThisPulse < uiRetryBudget)
+                const unsigned long ulRetryDelay = GetSomnisRetryDelayMs(pEntry->ucRetryCount);
+                if (pEntry->requestTimer.Get() > ulRetryDelay && uiRetriedThisPulse < uiRetryBudget)
                 {
+                    bool bDidRetry = false;
+
                     if (g_pGame->IsASyncLoadingEnabled())
                     {
                         pEntry->pModel->Request(NON_BLOCKING, "CClientModelRequestManager::DoPulse #1");
-                        pEntry->requestTimer.Reset();
-                        ++uiRetriedThisPulse;
+                        bDidRetry = true;
                     }
                     else if (g_pGame->IsASyncLoadingEnabled(true))
                     {
                         // Async is configured but temporarily suspended by the core/game.
-                        // This is exactly when falling back to BLOCKING is least desirable:
-                        // it can turn a safety suspension (ground loading, model transition,
-                        // focus/device recovery) into a main-thread hitch or freeze. Leave the
-                        // request queued; as soon as async resumes it will retry non-blocking.
+                        // Do not fall back to a blocking load while the client is intentionally
+                        // protecting a transition, ground load, focus change or device recovery.
                     }
                     else
                     {
@@ -368,8 +393,22 @@ void CClientModelRequestManager::DoPulse()
                         // original 1.6 semantics for servers/resources that intentionally rely
                         // on blocking loading.
                         pEntry->pModel->Request(BLOCKING, "CClientModelRequestManager::DoPulse #2");
+                        bDidRetry = true;
+                    }
+
+                    if (bDidRetry)
+                    {
                         pEntry->requestTimer.Reset();
+                        if (pEntry->ucRetryCount < 3)
+                            ++pEntry->ucRetryCount;
                         ++uiRetriedThisPulse;
+
+                        // Count budget alone is not enough: one pathological model or script
+                        // callback can be much more expensive than eight ordinary models.
+                        // Stop this pulse once the wall-clock budget is consumed and continue
+                        // cleanly on the next rendered frame.
+                        if (GetTimeUs() - uiPulseStartUs >= uiTimeBudgetUs)
+                            break;
                     }
                 }
 
