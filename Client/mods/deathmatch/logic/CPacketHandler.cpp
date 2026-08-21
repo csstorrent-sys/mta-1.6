@@ -3595,11 +3595,14 @@ retry:
                             bitStream.Read(ucSirenCount);
                             bitStream.Read(ucSirenType);
 
-                            pVehicle->GiveVehicleSirens(ucSirenType, ucSirenCount);
+                            const unsigned char ucStoredSirenCount = std::min<unsigned char>(ucSirenCount, SIREN_COUNT_MAX);
+                            pVehicle->GiveVehicleSirens(ucSirenType, ucStoredSirenCount);
                             for (int i = 0; i < ucSirenCount; i++)
                             {
                                 SVehicleSirenSync sirenData;
                                 bitStream.Read(&sirenData);
+                                if (i >= ucStoredSirenCount)
+                                    continue;
                                 pVehicle->SetVehicleSirenPosition(i, sirenData.data.m_vecSirenPositions);
                                 pVehicle->SetVehicleSirenColour(i, sirenData.data.m_colSirenColour);
                                 pVehicle->SetVehicleSirenMinimumAlpha(i, sirenData.data.m_dwSirenMinAlpha);

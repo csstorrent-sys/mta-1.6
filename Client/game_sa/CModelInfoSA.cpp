@@ -1745,14 +1745,15 @@ void CModelInfoSA::MakePedModel(char* szTexture)
 
 void CModelInfoSA::MakeObjectModel(ushort usBaseID)
 {
-    CBaseModelInfoSAInterface* m_pInterface = new CBaseModelInfoSAInterface();
+    CClumpModelInfoSAInterface* m_pInterface = new CClumpModelInfoSAInterface();
 
     CBaseModelInfoSAInterface* pBaseObjectInfo = ppModelInfo[usBaseID];
-    MemCpyFast(m_pInterface, pBaseObjectInfo, sizeof(CBaseModelInfoSAInterface));
+    MemCpyFast(m_pInterface, pBaseObjectInfo, sizeof(CClumpModelInfoSAInterface));
     m_pInterface->usNumberOfRefs = 0;
     m_pInterface->pRwObject = nullptr;
     m_pInterface->usUnknown = 65535;
     m_pInterface->usDynamicIndex = 65535;
+    m_pInterface->m_nAnimFileIndex = 0xFFFFFFFF;
 
     ppModelInfo[m_dwModelID] = m_pInterface;
 
