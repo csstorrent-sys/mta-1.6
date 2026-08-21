@@ -145,8 +145,9 @@ HRESULT CProxyDirectInputDevice8::GetDeviceData(DWORD a, LPDIDEVICEOBJECTDATA b,
                 m_pDevice->GetDeviceData(sizeof(DIDEVICEOBJECTDATA), NULL, &dwNumItems, 0);
             }
 
-            // Clear strucutre(s).
-            memset(b, 0, a * (*c));
+            // Clear structure(s). Null output is valid for count/flush queries.
+            if (b)
+                memset(b, 0, a * (*c));
             return hResult;
         }
     }
