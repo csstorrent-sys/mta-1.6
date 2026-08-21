@@ -145,9 +145,9 @@ void CClientStreamSector::AddElements(list<CClientStreamElement*>* pList, std::u
         // Don't add if already in the list (O(1) if set provided)
         if (pSet)
         {
-            if (pSet->count(*iter))
+            // insert() performs the lookup and insertion in one hash-table operation.
+            if (!pSet->insert(*iter).second)
                 continue;
-            pSet->insert(*iter);
         }
         else if (ListContains(*pList, *iter))
             continue;
@@ -158,11 +158,19 @@ void CClientStreamSector::AddElements(list<CClientStreamElement*>* pList, std::u
 
 void CClientStreamSector::RemoveElements(list<CClientStreamElement*>* pList, std::unordered_set<CClientStreamElement*>* pSet)
 {
-    list<CClientStreamElement*>::iterator iter = m_Elements.begin();
-    for (; iter != m_Elements.end(); iter++)
+    if (pSet)
     {
-        pList->remove(*iter);
-        if (pSet)
-            pSet->erase(*iter);
+        // Keep the hash set authoritative, then prune the list in one pass.
+        // The previous code called list::remove once per sector element, turning
+        // a busy sector transition into O(active * sector) work.
+        for (CClientStreamElement* pElement : m_Elements)
+            pSet->erase(pElement);
+
+        pList->remove_if([pSet](CClientStreamElement* pElement) { return pSet->find(pElement) == pSet->end(); });
+        return;
     }
+
+    // Legacy fallback for callers without an active-element set.
+    for (CClientStreamElement* pElement : m_Elements)
+        pList->remove(pElement);
 }
