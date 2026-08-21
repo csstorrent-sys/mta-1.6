@@ -26,7 +26,7 @@ CTaskManagerSA::CTaskManagerSA(CTaskManagerSAInterface* taskManagerInterface, CP
 
 void CTaskManagerSA::RemoveTask(const int iTaskPriority)
 {
-    if (iTaskPriority != TASK_PRIORITY_DEFAULT)  // TASK_PRIORITY_DEFAULT removed = crash
+    if (iTaskPriority >= 0 && iTaskPriority < TASK_PRIORITY_MAX && iTaskPriority != TASK_PRIORITY_DEFAULT)  // TASK_PRIORITY_DEFAULT removed = crash
     {
         SetTask(NULL, iTaskPriority);
     }
@@ -34,6 +34,9 @@ void CTaskManagerSA::RemoveTask(const int iTaskPriority)
 
 void CTaskManagerSA::SetTask(CTaskSA* pTaskPrimary, const int iTaskPriority, const bool bForceNewTask)
 {
+    if (iTaskPriority < 0 || iTaskPriority >= TASK_PRIORITY_MAX)
+        return;
+
     DWORD             dwFunc = FUNC_SetTask;
     CTaskSAInterface* taskInterface = NULL;
     if (pTaskPrimary)
@@ -56,8 +59,12 @@ void CTaskManagerSA::SetTask(CTaskSA* pTaskPrimary, const int iTaskPriority, con
 
 CTask* CTaskManagerSA::GetTask(const int iTaskPriority)
 {
-    CTaskManagerSAInterface* pTaskManagerInterface = GetInterface();
-    return m_pTaskManagementSystem->GetTask(pTaskManagerInterface->m_tasks[iTaskPriority]);
+    // Native GTA stores exactly TASK_PRIORITY_MAX primary task slots. An invalid
+    // script/resource value must never index outside that fixed array.
+    if (iTaskPriority >= 0 && iTaskPriority < TASK_PRIORITY_MAX)
+        return m_pTaskManagementSystem->GetTask(GetInterface()->m_tasks[iTaskPriority]);
+
+    return nullptr;
 }
 
 CTask* CTaskManagerSA::GetActiveTask()
@@ -102,6 +109,9 @@ CTask* CTaskManagerSA::GetSimplestActiveTask()
 
 CTask* CTaskManagerSA::GetSimplestTask(const int iPriority)
 {
+    if (iPriority < 0 || iPriority >= TASK_PRIORITY_MAX)
+        return nullptr;
+
     DWORD dwFunc = FUNC_GetSimplestTask;
     DWORD dwReturn = 0;
     DWORD dwThis = (DWORD)GetInterface();
@@ -140,6 +150,9 @@ CTask* CTaskManagerSA::FindActiveTaskByType(const int iTaskType)
 
 CTask* CTaskManagerSA::FindTaskByType(const int iPriority, const int iTaskType)
 {
+    if (iPriority < 0 || iPriority >= TASK_PRIORITY_MAX)
+        return nullptr;
+
     DWORD dwFunc = FUNC_FindTaskByType;
     DWORD dwReturn = 0;
     DWORD dwThis = (DWORD)GetInterface();
@@ -160,7 +173,8 @@ CTask* CTaskManagerSA::FindTaskByType(const int iPriority, const int iTaskType)
 
 void CTaskManagerSA::RemoveTaskSecondary(const int iTaskPriority)
 {
-    SetTaskSecondary(NULL, iTaskPriority);
+    if (iTaskPriority >= 0 && iTaskPriority < TASK_SECONDARY_MAX)
+        SetTaskSecondary(NULL, iTaskPriority);
 }
 
 bool CTaskManagerSA::RemoveTaskSecondary(const int taskPriority, const int taskType)
@@ -177,6 +191,9 @@ bool CTaskManagerSA::RemoveTaskSecondary(const int taskPriority, const int taskT
 
 void CTaskManagerSA::SetTaskSecondary(CTaskSA* pTaskSecondary, const int iType)
 {
+    if (iType < 0 || iType >= TASK_SECONDARY_MAX)
+        return;
+
     DWORD             dwFunc = FUNC_SetTaskSecondary;
     CTaskSAInterface* taskInterface = NULL;
     if (pTaskSecondary)
@@ -198,7 +215,7 @@ void CTaskManagerSA::SetTaskSecondary(CTaskSA* pTaskSecondary, const int iType)
  */
 CTask* CTaskManagerSA::GetTaskSecondary(const int iType)
 {
-    if (iType < TASK_SECONDARY_MAX)
+    if (iType >= 0 && iType < TASK_SECONDARY_MAX)
         return m_pTaskManagementSystem->GetTask(GetInterface()->m_tasksSecondary[iType]);
     else
         return NULL;
