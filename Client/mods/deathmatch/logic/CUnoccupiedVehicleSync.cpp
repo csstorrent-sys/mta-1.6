@@ -28,9 +28,9 @@ CUnoccupiedVehicleSync::~CUnoccupiedVehicleSync()
 {
 }
 
-bool CUnoccupiedVehicleSync::ProcessPacket(unsigned char ucPacketID, NetBitStreamInterface& BitStream)
+bool CUnoccupiedVehicleSync::ProcessPacket(unsigned char bytePacketID, NetBitStreamInterface& BitStream)
 {
-    switch (ucPacketID)
+    switch (bytePacketID)
     {
         case PACKET_ID_UNOCCUPIED_VEHICLE_STARTSYNC:
         {
@@ -235,7 +235,8 @@ void CUnoccupiedVehicleSync::UpdateStates()
         !pPlayer->GetRealOccupiedVehicle())
     {
         // Make sure it's valid and add it to our list temporarily
-        if (auto* pVehicle = dynamic_cast<CDeathmatchVehicle*>(pPlayer->GetOccupiedVehicle()))
+        pVehicle = dynamic_cast<CDeathmatchVehicle*>(pPlayer->GetOccupiedVehicle());
+        if (pVehicle)
             m_List.push_front(pVehicle);
     }
 
