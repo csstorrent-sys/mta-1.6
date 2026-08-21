@@ -348,17 +348,29 @@ void CClientModelRequestManager::DoPulse()
                 // Been more than 2 seconds since we requested it? Request it again.
                 if (pEntry->requestTimer.Get() > 2000 && uiRetriedThisPulse < uiRetryBudget)
                 {
-                    // Preserve MTA's explicit async/suspend semantics. When async is available,
-                    // use the non-blocking request path; when a script/core explicitly suspended
-                    // it, retain the original 1.6 blocking behavior instead of bypassing safety.
                     if (g_pGame->IsASyncLoadingEnabled())
+                    {
                         pEntry->pModel->Request(NON_BLOCKING, "CClientModelRequestManager::DoPulse #1");
+                        pEntry->requestTimer.Reset();
+                        ++uiRetriedThisPulse;
+                    }
+                    else if (g_pGame->IsASyncLoadingEnabled(true))
+                    {
+                        // Async is configured but temporarily suspended by the core/game.
+                        // This is exactly when falling back to BLOCKING is least desirable:
+                        // it can turn a safety suspension (ground loading, model transition,
+                        // focus/device recovery) into a main-thread hitch or freeze. Leave the
+                        // request queued; as soon as async resumes it will retry non-blocking.
+                    }
                     else
+                    {
+                        // Async was explicitly disabled rather than merely suspended. Preserve
+                        // original 1.6 semantics for servers/resources that intentionally rely
+                        // on blocking loading.
                         pEntry->pModel->Request(BLOCKING, "CClientModelRequestManager::DoPulse #2");
-
-                    // Remember now as the time we requested it.
-                    pEntry->requestTimer.Reset();
-                    ++uiRetriedThisPulse;
+                        pEntry->requestTimer.Reset();
+                        ++uiRetriedThisPulse;
+                    }
                 }
 
                 // Increment iterator
