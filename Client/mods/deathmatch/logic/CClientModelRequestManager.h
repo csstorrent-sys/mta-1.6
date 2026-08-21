@@ -15,6 +15,7 @@ class CClientModelRequestManager;
 #include "CClientCommon.h"
 #include "CClientEntity.h"
 #include <list>
+#include <unordered_map>
 
 struct SClientModelRequest
 {
@@ -42,10 +43,15 @@ public:
     void Cancel(CClientEntity* pRequester, bool bAllowQueue);
 
 private:
-    void DoPulse();
-    bool GetRequestEntry(CClientEntity* pRequester, std::list<SClientModelRequest*>::iterator& iter);
+    using RequestList = std::list<SClientModelRequest*>;
+    using RequestIterator = RequestList::iterator;
 
-    bool                            m_bDoingPulse;
-    std::list<SClientModelRequest*> m_Requests;
-    std::list<CClientEntity*>       m_CancelQueue;
+    void DoPulse();
+    bool GetRequestEntry(CClientEntity* pRequester, RequestIterator& iter);
+    void RemoveRequestLookup(CClientEntity* pRequester);
+
+    bool                                             m_bDoingPulse;
+    RequestList                                      m_Requests;
+    std::unordered_map<CClientEntity*, RequestIterator> m_RequestByEntity;
+    std::list<CClientEntity*>                        m_CancelQueue;
 };
