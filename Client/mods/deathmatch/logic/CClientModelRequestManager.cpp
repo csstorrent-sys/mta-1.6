@@ -14,17 +14,14 @@ using std::list;
 
 namespace
 {
-    // Somnis: do not let a large batch of models all finish/retry in the same frame.
+    // Somnis: do not let a large batch of models all finish/retry/cancel in the same frame.
     // The original 1.6 loop can activate every ready model at once and can also re-request
     // every overdue model on the same pulse. On heavily modded RP servers that turns one
-    // frame into a burst of DFF/TXD/model work and native entity creation.
-    //
-    // The upper limits preserve throughput on fast PCs. The actual per-frame budget is
-    // reduced automatically when frame rate is already under pressure, so streaming work
-    // cannot make a bad frame substantially worse.
+    // frame into a burst of DFF/TXD/model work and native entity creation/destruction.
     constexpr size_t SOMNIS_MAX_IMMEDIATE_LOADED_REQUESTS_PER_FRAME = 8;
     constexpr size_t SOMNIS_MAX_MODEL_COMPLETIONS_PER_PULSE = 8;
     constexpr size_t SOMNIS_MAX_MODEL_RETRIES_PER_PULSE = 16;
+    constexpr size_t SOMNIS_MAX_MODEL_CANCELS_PER_PULSE = 64;
     constexpr unsigned long SOMNIS_BASE_MODEL_RETRY_MS = 2000;
     constexpr unsigned long SOMNIS_MAX_MODEL_RETRY_MS = 8000;
 
@@ -52,6 +49,19 @@ namespace
         if (fFPS > 0.0f && fFPS < 40.0f)
             return 8;
         return SOMNIS_MAX_MODEL_RETRIES_PER_PULSE;
+    }
+
+    size_t GetSomnisCancelBudget()
+    {
+        if (!g_pGame)
+            return SOMNIS_MAX_MODEL_CANCELS_PER_PULSE;
+
+        const float fFPS = g_pGame->GetFPS();
+        if (fFPS > 0.0f && fFPS < 25.0f)
+            return 16;
+        if (fFPS > 0.0f && fFPS < 40.0f)
+            return 32;
+        return SOMNIS_MAX_MODEL_CANCELS_PER_PULSE;
     }
 
     TIMEUS GetSomnisPulseTimeBudgetUs()
@@ -106,6 +116,7 @@ CClientModelRequestManager::CClientModelRequestManager()
     // area. Reserve lookup space once so the client does not repeatedly rehash while
     // the async streamer is already under load.
     m_RequestByEntity.reserve(256);
+    m_CancelQueuedEntities.reserve(256);
 }
 
 CClientModelRequestManager::~CClientModelRequestManager()
@@ -119,31 +130,26 @@ CClientModelRequestManager::~CClientModelRequestManager()
 
     m_Requests.clear();
     m_RequestByEntity.clear();
+    m_CancelQueue.clear();
+    m_CancelQueuedEntities.clear();
 }
 
 bool CClientModelRequestManager::IsLoaded(unsigned short usModelID)
 {
-    // Grab the model info
     CModelInfo* pInfo = g_pGame->GetModelInfo(usModelID);
     if (pInfo)
-    {
         return pInfo->IsLoaded() ? true : false;
-    }
 
     return false;
 }
 
 bool CClientModelRequestManager::IsRequested(CModelInfo* pModelInfo)
 {
-    // Model-level queries are uncommon compared with requester lookups. Keep this scan
-    // simple while the hot entity path below uses O(1) lookup.
     std::list<SClientModelRequest*>::iterator iter = m_Requests.begin();
     for (; iter != m_Requests.end(); iter++)
     {
         if ((*iter)->pModel == pModelInfo)
-        {
             return true;
-        }
     }
 
     return false;
@@ -172,7 +178,6 @@ CModelInfo* CClientModelRequestManager::GetRequestedModelInfo(CClientEntity* pRe
 
 bool CClientModelRequestManager::RequestBlocking(unsigned short usModelID, const char* szTag)
 {
-    // Grab the model info
     CModelInfo* pInfo = g_pGame->GetModelInfo(usModelID);
     if (pInfo)
     {
@@ -185,7 +190,6 @@ bool CClientModelRequestManager::RequestBlocking(unsigned short usModelID, const
         OutputDebugLine(SString("[Models] RequestBlocking failed for id %d", usModelID));
     }
 
-    // Bad model ID probably.
     return false;
 }
 
@@ -194,245 +198,196 @@ bool CClientModelRequestManager::Request(unsigned short usModelID, CClientEntity
     assert(pRequester);
     SClientModelRequest* pEntry;
 
-    // Grab the model info for that model
     CModelInfo* pInfo = g_pGame->GetModelInfo(usModelID);
     if (pInfo)
     {
-        // Has it already requested something?
         RequestIterator iter;
         if (GetRequestEntry(pRequester, iter))
         {
-            // Get the entry
             pEntry = *iter;
 
-            // The same model?
             if (pInfo == pEntry->pModel)
+                return false;
+
+            pEntry->pModel->RemoveRef();
+
+            if (pInfo->IsLoaded())
             {
-                // He has to wait more for it
+                if (CanActivateLoadedModelImmediately())
+                {
+                    RemoveRequestLookup(pRequester);
+                    delete pEntry;
+                    m_Requests.erase(iter);
+
+                    pInfo->MakeCustomModel();
+                    return true;
+                }
+
+                pEntry->pModel = pInfo;
+                pEntry->ucRetryCount = 0;
+                pEntry->requestTimer.SetMaxIncrement(500);
+                pEntry->requestTimer.Reset();
+                pInfo->ModelAddRef(NON_BLOCKING, "CClientModelRequestManager::Request deferred loaded");
                 return false;
             }
-            else
-            {
-                // Remove the reference to the old model
-                pEntry->pModel->RemoveRef();
 
-                // Is it loaded?
-                if (pInfo->IsLoaded())
-                {
-                    if (CanActivateLoadedModelImmediately())
-                    {
-                        // Delete it, remove it from the list and return true.
-                        RemoveRequestLookup(pRequester);
-                        delete pEntry;
-                        m_Requests.erase(iter);
-
-                        pInfo->MakeCustomModel();
-                        return true;
-                    }
-
-                    // A large entity packet can reference many models that are already resident.
-                    // Queue the excess instead of creating every native entity on this one frame.
-                    pEntry->pModel = pInfo;
-                    pEntry->ucRetryCount = 0;
-                    pEntry->requestTimer.SetMaxIncrement(500);
-                    pEntry->requestTimer.Reset();
-                    pInfo->ModelAddRef(NON_BLOCKING, "CClientModelRequestManager::Request deferred loaded");
-                    return false;
-                }
-                else
-                {
-                    // If not loaded. Replace the model we're going to load.
-                    // Also remember that we requested it now.
-                    pEntry->pModel = pInfo;
-                    pEntry->ucRetryCount = 0;
-                    pEntry->requestTimer.Reset();
-
-                    // Start loading the new model.
-                    pInfo->ModelAddRef(NON_BLOCKING, "CClientModelRequestManager::Request");
-
-                    // He has to wait for it.
-                    return false;
-                }
-            }
-        }
-        else
-        {
-            // Already loaded? Usually return immediately, but during a burst defer excess
-            // native entity creation to the normal model-request callback queue.
-            if (pInfo->IsLoaded() && CanActivateLoadedModelImmediately())
-            {
-                pInfo->MakeCustomModel();
-                return true;
-            }
-
-            // Hold a reference while the request waits in our queue. This is also used for
-            // already-loaded models that are intentionally being activated progressively.
-            pInfo->ModelAddRef(NON_BLOCKING, "CClientModelRequestManager::Request #2");
-
-            // Add him to the list over models we're waiting for.
-            pEntry = new SClientModelRequest;
             pEntry->pModel = pInfo;
-            pEntry->pEntity = pRequester;
             pEntry->ucRetryCount = 0;
-            pEntry->requestTimer.SetMaxIncrement(500);
             pEntry->requestTimer.Reset();
-            m_Requests.push_back(pEntry);
-
-            RequestIterator newIter = m_Requests.end();
-            --newIter;
-            m_RequestByEntity[pRequester] = newIter;
-
-            // Return false. Caller needs to wait.
+            pInfo->ModelAddRef(NON_BLOCKING, "CClientModelRequestManager::Request");
             return false;
         }
+
+        if (pInfo->IsLoaded() && CanActivateLoadedModelImmediately())
+        {
+            pInfo->MakeCustomModel();
+            return true;
+        }
+
+        pInfo->ModelAddRef(NON_BLOCKING, "CClientModelRequestManager::Request #2");
+
+        pEntry = new SClientModelRequest;
+        pEntry->pModel = pInfo;
+        pEntry->pEntity = pRequester;
+        pEntry->ucRetryCount = 0;
+        pEntry->requestTimer.SetMaxIncrement(500);
+        pEntry->requestTimer.Reset();
+        m_Requests.push_back(pEntry);
+
+        RequestIterator newIter = m_Requests.end();
+        --newIter;
+        m_RequestByEntity[pRequester] = newIter;
+        return false;
     }
 
-    // Error, model is bad. Caller should not do this.
     return false;
 }
 
 void CClientModelRequestManager::Cancel(CClientEntity* pEntity, bool bAllowQueue)
 {
     assert(pEntity);
-    // Check to ensure entity has not got its knickers in a twist
-    if (ListContains(m_CancelQueue, pEntity))
+
+    if (m_CancelQueuedEntities.find(pEntity) != m_CancelQueuedEntities.end())
         return;
 
-    // Are we inside a pulse? Add it to a list to delete after or we'll crash.
-    // If not, cancel now.
+    // During callbacks the request list may be actively mutated. Defer the cancellation,
+    // but keep an O(1) set beside the list so a mass stream-out cannot turn duplicate
+    // checks into an O(n²) frame spike.
     if (m_bDoingPulse)
     {
-        // Check queuing is allowed by the caller
         assert(bAllowQueue);
         m_CancelQueue.push_back(pEntity);
+        m_CancelQueuedEntities.insert(pEntity);
+        return;
     }
-    else
-    {
-        RequestIterator iter;
-        if (GetRequestEntry(pEntity, iter))
-        {
-            SClientModelRequest* pEntry = *iter;
-            pEntry->pModel->RemoveRef();
 
-            RemoveRequestLookup(pEntity);
-            delete pEntry;
-            m_Requests.erase(iter);
-        }
+    RequestIterator iter;
+    if (GetRequestEntry(pEntity, iter))
+    {
+        SClientModelRequest* pEntry = *iter;
+        pEntry->pModel->RemoveRef();
+
+        RemoveRequestLookup(pEntity);
+        delete pEntry;
+        m_Requests.erase(iter);
     }
 }
 
 void CClientModelRequestManager::DoPulse()
 {
-    // Any requests?
-    if (m_Requests.size() > 0)
+    if (m_Requests.empty() && m_CancelQueue.empty())
+        return;
+
+    m_bDoingPulse = true;
+
+    const size_t uiCompletionBudget = GetSomnisCompletionBudget();
+    const size_t uiRetryBudget = GetSomnisRetryBudget();
+    const TIMEUS uiTimeBudgetUs = GetSomnisPulseTimeBudgetUs();
+    const TIMEUS uiPulseStartUs = GetTimeUs();
+    size_t       uiCompletedThisPulse = 0;
+    size_t       uiRetriedThisPulse = 0;
+
+    SClientModelRequest* pEntry;
+    RequestIterator      iter;
+    for (iter = m_Requests.begin(); iter != m_Requests.end();)
     {
-        // We are now doing the pulse
-        m_bDoingPulse = true;
+        pEntry = *iter;
 
-        const size_t uiCompletionBudget = GetSomnisCompletionBudget();
-        const size_t uiRetryBudget = GetSomnisRetryBudget();
-        const TIMEUS uiTimeBudgetUs = GetSomnisPulseTimeBudgetUs();
-        const TIMEUS uiPulseStartUs = GetTimeUs();
-        size_t       uiCompletedThisPulse = 0;
-        size_t       uiRetriedThisPulse = 0;
-
-        // Call callbacks for finished models, but deliberately pace the expensive
-        // MakeCustomModel/native entity creation work over several rendered frames.
-        SClientModelRequest* pEntry;
-        RequestIterator      iter;
-        for (iter = m_Requests.begin(); iter != m_Requests.end();)
+        if (pEntry->pModel->IsLoaded())
         {
-            pEntry = *iter;
+            const SClientModelRequest entryCopy = *pEntry;
+            RemoveRequestLookup(entryCopy.pEntity);
+            delete pEntry;
+            m_Requests.erase(iter);
 
-            // Is it loaded?
-            if (pEntry->pModel->IsLoaded())
+            entryCopy.pModel->MakeCustomModel();
+            entryCopy.pEntity->ModelRequestCallback(entryCopy.pModel);
+            entryCopy.pModel->RemoveRef();
+
+            ++uiCompletedThisPulse;
+            if (uiCompletedThisPulse >= uiCompletionBudget || GetTimeUs() - uiPulseStartUs >= uiTimeBudgetUs)
+                break;
+
+            // Callback code is allowed to mutate the request list, so restart safely.
+            iter = m_Requests.begin();
+        }
+        else
+        {
+            const unsigned long ulRetryDelay = GetSomnisRetryDelayMs(pEntry->ucRetryCount);
+            if (pEntry->requestTimer.Get() > ulRetryDelay && uiRetriedThisPulse < uiRetryBudget)
             {
-                // Copy then remove from the list because the request is complete and we don't want it modified in Request()
-                const SClientModelRequest entryCopy = *pEntry;
-                RemoveRequestLookup(entryCopy.pEntity);
-                delete pEntry;
-                m_Requests.erase(iter);
+                bool bDidRetry = false;
 
-                // Make sure custom things are replaced
-                entryCopy.pModel->MakeCustomModel();
-
-                // Create ped/object/vehicle using the loaded model (this can eventually trigger script events)
-                entryCopy.pEntity->ModelRequestCallback(entryCopy.pModel);
-
-                // Unreference us from the model (callback should've added a reference!)
-                entryCopy.pModel->RemoveRef();
-
-                ++uiCompletedThisPulse;
-                if (uiCompletedThisPulse >= uiCompletionBudget || GetTimeUs() - uiPulseStartUs >= uiTimeBudgetUs)
-                    break;
-
-                // Restart loop because m_Requests may have been changed
-                iter = m_Requests.begin();
-            }
-            else
-            {
-                const unsigned long ulRetryDelay = GetSomnisRetryDelayMs(pEntry->ucRetryCount);
-                if (pEntry->requestTimer.Get() > ulRetryDelay && uiRetriedThisPulse < uiRetryBudget)
+                if (g_pGame->IsASyncLoadingEnabled())
                 {
-                    bool bDidRetry = false;
-
-                    if (g_pGame->IsASyncLoadingEnabled())
-                    {
-                        pEntry->pModel->Request(NON_BLOCKING, "CClientModelRequestManager::DoPulse #1");
-                        bDidRetry = true;
-                    }
-                    else if (g_pGame->IsASyncLoadingEnabled(true))
-                    {
-                        // Async is configured but temporarily suspended by the core/game.
-                        // Do not fall back to a blocking load while the client is intentionally
-                        // protecting a transition, ground load, focus change or device recovery.
-                    }
-                    else
-                    {
-                        // Async was explicitly disabled rather than merely suspended. Preserve
-                        // original 1.6 semantics for servers/resources that intentionally rely
-                        // on blocking loading.
-                        pEntry->pModel->Request(BLOCKING, "CClientModelRequestManager::DoPulse #2");
-                        bDidRetry = true;
-                    }
-
-                    if (bDidRetry)
-                    {
-                        pEntry->requestTimer.Reset();
-                        if (pEntry->ucRetryCount < 3)
-                            ++pEntry->ucRetryCount;
-                        ++uiRetriedThisPulse;
-
-                        // Count budget alone is not enough: one pathological model or script
-                        // callback can be much more expensive than eight ordinary models.
-                        // Stop this pulse once the wall-clock budget is consumed and continue
-                        // cleanly on the next rendered frame.
-                        if (GetTimeUs() - uiPulseStartUs >= uiTimeBudgetUs)
-                            break;
-                    }
+                    pEntry->pModel->Request(NON_BLOCKING, "CClientModelRequestManager::DoPulse #1");
+                    bDidRetry = true;
+                }
+                else if (g_pGame->IsASyncLoadingEnabled(true))
+                {
+                    // Async is configured but temporarily suspended by the core/game.
+                    // Never turn that safety suspension into a blocking main-thread load.
+                }
+                else
+                {
+                    // Explicit script-side async disable keeps original 1.6 behaviour.
+                    pEntry->pModel->Request(BLOCKING, "CClientModelRequestManager::DoPulse #2");
+                    bDidRetry = true;
                 }
 
-                // Increment iterator
-                ++iter;
+                if (bDidRetry)
+                {
+                    pEntry->requestTimer.Reset();
+                    if (pEntry->ucRetryCount < 3)
+                        ++pEntry->ucRetryCount;
+                    ++uiRetriedThisPulse;
+
+                    if (GetTimeUs() - uiPulseStartUs >= uiTimeBudgetUs)
+                        break;
+                }
             }
+
+            ++iter;
         }
+    }
 
-        // No longer doing the pulse
-        m_bDoingPulse = false;
+    m_bDoingPulse = false;
 
-        // Cancel what we've scheduled for cancel now if anything
-        if (m_CancelQueue.size() > 0)
-        {
-            // Cancel every entity in our cancel list
-            list<CClientEntity*> cancelQueueCopy = m_CancelQueue;
-            m_CancelQueue.clear();
+    // A large sector unload can schedule hundreds of request cancellations at once.
+    // Destroying them all after one callback defeats the progressive loader, so drain
+    // the queue with the same FPS/time aware approach and leave the rest for next pulse.
+    const size_t uiCancelBudget = GetSomnisCancelBudget();
+    size_t       uiCancelledThisPulse = 0;
+    while (!m_CancelQueue.empty() && uiCancelledThisPulse < uiCancelBudget)
+    {
+        CClientEntity* pEntity = m_CancelQueue.front();
+        m_CancelQueue.pop_front();
+        m_CancelQueuedEntities.erase(pEntity);
+        Cancel(pEntity, false);
+        ++uiCancelledThisPulse;
 
-            list<CClientEntity*>::iterator iter = cancelQueueCopy.begin();
-            for (; iter != cancelQueueCopy.end(); ++iter)
-            {
-                Cancel(*iter, false);
-            }
-        }
+        if (GetTimeUs() - uiPulseStartUs >= uiTimeBudgetUs)
+            break;
     }
 }
 
