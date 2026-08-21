@@ -22,6 +22,7 @@ struct SClientModelRequest
     CModelInfo*    pModel;
     CClientEntity* pEntity;
     CElapsedTime   requestTimer;
+    unsigned char  ucRetryCount = 0;
 };
 
 class CClientModelRequestManager
@@ -50,8 +51,8 @@ private:
     bool GetRequestEntry(CClientEntity* pRequester, RequestIterator& iter);
     void RemoveRequestLookup(CClientEntity* pRequester);
 
-    bool                                             m_bDoingPulse;
-    RequestList                                      m_Requests;
+    bool                                                m_bDoingPulse;
+    RequestList                                         m_Requests;
     std::unordered_map<CClientEntity*, RequestIterator> m_RequestByEntity;
-    std::list<CClientEntity*>                        m_CancelQueue;
+    std::list<CClientEntity*>                           m_CancelQueue;
 };
