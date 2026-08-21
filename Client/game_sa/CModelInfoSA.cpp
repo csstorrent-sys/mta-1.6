@@ -396,13 +396,18 @@ void CModelInfoSA::Request(EModelRequestType requestType, const char* szTag)
     if (requestType == BLOCKING)
     {
         pGame->GetStreaming()->RequestModel(m_dwModelID, 0x16);
+        const uint32_t blockingStartTick = SharedUtil::GetTickCount32();
         pGame->GetStreaming()->LoadAllRequestedModels(true, szTag);
         if (!IsLoaded())
         {
-            // Try 3 more times, final time without high priority flag
+            // Retry, but never let a persistent streaming I/O failure multiply
+            // into an arbitrarily long client freeze.
             int iCount = 0;
             while (iCount++ < 10 && !IsLoaded())
             {
+                if ((SharedUtil::GetTickCount32() - blockingStartTick) > 10000)
+                    break;
+
                 bool bOnlyPriorityModels = (iCount < 3 || iCount & 1);
                 pGame->GetStreaming()->LoadAllRequestedModels(bOnlyPriorityModels, szTag);
             }
