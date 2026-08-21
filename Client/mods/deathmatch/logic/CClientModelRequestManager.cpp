@@ -19,11 +19,43 @@ namespace
     // every overdue model on the same pulse. On heavily modded RP servers that turns one
     // frame into a burst of DFF/TXD/model work and native entity creation.
     //
-    // These limits keep the existing async model streamer and API semantics intact; they
-    // only spread bursty completion/retry work across consecutive frames.
+    // The upper limits preserve throughput on fast PCs. The actual per-frame budget is
+    // reduced automatically when frame rate is already under pressure, so streaming work
+    // cannot make a bad frame substantially worse.
     constexpr size_t SOMNIS_MAX_IMMEDIATE_LOADED_REQUESTS_PER_FRAME = 8;
     constexpr size_t SOMNIS_MAX_MODEL_COMPLETIONS_PER_PULSE = 8;
     constexpr size_t SOMNIS_MAX_MODEL_RETRIES_PER_PULSE = 16;
+
+    size_t GetSomnisCompletionBudget()
+    {
+        if (!g_pGame)
+            return SOMNIS_MAX_MODEL_COMPLETIONS_PER_PULSE;
+
+        const float fFPS = g_pGame->GetFPS();
+        if (fFPS > 0.0f && fFPS < 25.0f)
+            return 2;
+        if (fFPS > 0.0f && fFPS < 40.0f)
+            return 4;
+        return SOMNIS_MAX_MODEL_COMPLETIONS_PER_PULSE;
+    }
+
+    size_t GetSomnisRetryBudget()
+    {
+        if (!g_pGame)
+            return SOMNIS_MAX_MODEL_RETRIES_PER_PULSE;
+
+        const float fFPS = g_pGame->GetFPS();
+        if (fFPS > 0.0f && fFPS < 25.0f)
+            return 4;
+        if (fFPS > 0.0f && fFPS < 40.0f)
+            return 8;
+        return SOMNIS_MAX_MODEL_RETRIES_PER_PULSE;
+    }
+
+    size_t GetSomnisImmediateBudget()
+    {
+        return std::min(SOMNIS_MAX_IMMEDIATE_LOADED_REQUESTS_PER_FRAME, GetSomnisCompletionBudget());
+    }
 
     bool CanActivateLoadedModelImmediately()
     {
@@ -37,7 +69,7 @@ namespace
             s_uiActivatedThisFrame = 0;
         }
 
-        if (s_uiActivatedThisFrame >= SOMNIS_MAX_IMMEDIATE_LOADED_REQUESTS_PER_FRAME)
+        if (s_uiActivatedThisFrame >= GetSomnisImmediateBudget())
             return false;
 
         ++s_uiActivatedThisFrame;
@@ -300,8 +332,10 @@ void CClientModelRequestManager::DoPulse()
         // We are now doing the pulse
         m_bDoingPulse = true;
 
-        size_t uiCompletedThisPulse = 0;
-        size_t uiRetriedThisPulse = 0;
+        const size_t uiCompletionBudget = GetSomnisCompletionBudget();
+        const size_t uiRetryBudget = GetSomnisRetryBudget();
+        size_t       uiCompletedThisPulse = 0;
+        size_t       uiRetriedThisPulse = 0;
 
         // Call callbacks for finished models, but deliberately pace the expensive
         // MakeCustomModel/native entity creation work over several rendered frames.
@@ -329,7 +363,7 @@ void CClientModelRequestManager::DoPulse()
                 entryCopy.pModel->RemoveRef();
 
                 ++uiCompletedThisPulse;
-                if (uiCompletedThisPulse >= SOMNIS_MAX_MODEL_COMPLETIONS_PER_PULSE)
+                if (uiCompletedThisPulse >= uiCompletionBudget)
                     break;
 
                 // Restart loop because m_Requests may have been changed
@@ -338,10 +372,11 @@ void CClientModelRequestManager::DoPulse()
             else
             {
                 // Been more than 2 seconds since we requested it? Request it again.
-                if (pEntry->requestTimer.Get() > 2000 && uiRetriedThisPulse < SOMNIS_MAX_MODEL_RETRIES_PER_PULSE)
+                if (pEntry->requestTimer.Get() > 2000 && uiRetriedThisPulse < uiRetryBudget)
                 {
-                    // Request it again. Don't add reference, or we screw up the
-                    // reference count.
+                    // Preserve MTA's explicit async/suspend semantics. When async is available,
+                    // use the non-blocking request path; when a script/core explicitly suspended
+                    // it, retain the original 1.6 blocking behavior instead of bypassing safety.
                     if (g_pGame->IsASyncLoadingEnabled())
                         pEntry->pModel->Request(NON_BLOCKING, "CClientModelRequestManager::DoPulse #1");
                     else
