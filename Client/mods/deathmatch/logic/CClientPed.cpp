@@ -183,6 +183,8 @@ void CClientPed::Init(CClientManager* pManager, unsigned long ulModelID, bool bI
     m_bSunbathing = false;
     m_bDestroyingSatchels = false;
     m_bDoingGangDriveby = false;
+    m_bProcessingWeaponFireEvent = false;
+    m_bDeferredGangDrivebyAbort = false;
 
     m_pAnimationBlock = NULL;
     m_bRequestedAnimation = false;
@@ -2747,6 +2749,16 @@ void CClientPed::StreamedInPulse(bool bDoStandardPulses)
 
         if (m_bPendingRebuildPlayer)
             ProcessRebuildPlayer(true);
+
+        // A weapon-fire event may request drive-by shutdown while GTA is still inside
+        // CTaskSimpleGangDriveBy::ProcessPed. Abort on the next pulse instead.
+        if (m_bDeferredGangDrivebyAbort)
+        {
+            m_bDeferredGangDrivebyAbort = false;
+            CTask* primaryTask = m_pTaskManager->GetTask(TASK_PRIORITY_PRIMARY);
+            if (primaryTask && primaryTask->GetTaskType() == TASK_SIMPLE_GANG_DRIVEBY)
+                primaryTask->MakeAbortable(m_pPlayerPed, ABORT_PRIORITY_URGENT, NULL);
+        }
 
         CControllerState Current;
         GetControllerState(Current);
@@ -5719,7 +5731,14 @@ void CClientPed::SetDoingGangDriveby(bool bDriveby)
     {
         if (!bDriveby)
         {
-            primaryTask->MakeAbortable(m_pPlayerPed, ABORT_PRIORITY_URGENT, NULL);
+            if (m_bProcessingWeaponFireEvent)
+            {
+                m_bDeferredGangDrivebyAbort = true;
+            }
+            else
+            {
+                primaryTask->MakeAbortable(m_pPlayerPed, ABORT_PRIORITY_URGENT, NULL);
+            }
         }
     }
     else if (bDriveby)

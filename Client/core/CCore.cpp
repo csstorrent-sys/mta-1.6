@@ -142,6 +142,7 @@ CCore::CCore()
 
     m_bIsOfflineMod = false;
     m_bQuitOnPulse = false;
+    m_bIsQuitting = false;
     m_bDestroyMessageBox = false;
     m_bCursorToggleControls = false;
     m_bLastFocused = true;
@@ -1246,7 +1247,10 @@ CWebCoreInterface* CCore::GetWebCore()
 void CCore::DestroyWeb()
 {
     WriteDebugEvent("CCore::DestroyWeb");
-    SAFE_DELETE(m_pWebCore);
+    // CefShutdown can stall during the instant process-exit path. Normal teardown
+    // still performs full cleanup; instant quit lets process termination reclaim it.
+    if (!m_bIsQuitting)
+        SAFE_DELETE(m_pWebCore);
     m_WebCoreModule.UnloadModule();
 }
 
@@ -1556,6 +1560,7 @@ void CCore::Quit(bool bInstantly)
 {
     if (bInstantly)
     {
+        m_bIsQuitting = true;
         AddReportLog(7101, "Core - Quit");
         // Show that we are quiting (for the crash dump filename)
         SetApplicationSettingInt("last-server-ip", 1);

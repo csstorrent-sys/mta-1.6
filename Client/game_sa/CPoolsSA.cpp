@@ -341,6 +341,26 @@ void CPoolsSA::DeleteAllObjects()
     }
 }
 
+void CPoolsSA::ResetDetachedCarPartsRefModel(std::uint16_t usModelID) noexcept
+{
+    CPoolSAInterface<CObjectSAInterface>* pObjectPool = *m_ppObjectPoolInterface;
+    if (!pObjectPool)
+        return;
+
+    for (int i = 0; i < pObjectPool->m_nSize; ++i)
+    {
+        if (pObjectPool->IsEmpty(i))
+            continue;
+
+        CObjectSAInterface* pObject = pObjectPool->GetObject(i);
+        if (pObject && pObject->sRefModelIndex == static_cast<short>(usModelID))
+        {
+            pObject->sRefModelIndex = -1;
+            pObject->bChangesVehColor = false;
+        }
+    }
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////
 //                                       PEDS POOL                                      //
 //////////////////////////////////////////////////////////////////////////////////////////

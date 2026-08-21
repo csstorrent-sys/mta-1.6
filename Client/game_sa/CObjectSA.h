@@ -63,7 +63,7 @@ public:
     uint32 b0x10 : 1;
     uint32 b0x20 : 1;
     uint32 bExploded : 1;
-    uint32 b0x80 : 1;
+    uint32 bChangesVehColor : 1;
 
     uint32 b0x100 : 1;  // 321
     uint32 b0x200 : 1;
@@ -98,7 +98,7 @@ public:
     uint8               pad6;                 // 327
     uint8               pad7;                 // 328
     uint8               pad8;                 // 329
-    uint16              pad9;                 // 330
+    short               sRefModelIndex;       // 330, source vehicle model for detached car parts (-1 = none)
     uint8               pad10;                // 332
     uint8               pad11;                // 333
     uint8               pad12;                // 334

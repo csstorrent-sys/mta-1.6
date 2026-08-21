@@ -17,6 +17,7 @@
 #include "CModelInfoSA.h"
 #include "CPedModelInfoSA.h"
 #include "CPedSA.h"
+#include "CPoolsSA.h"
 #include "CWorldSA.h"
 #include "gamesa_renderware.h"
 
@@ -1838,6 +1839,7 @@ void CModelInfoSA::DeallocateModel(void)
     switch (GetModelType())
     {
         case eModelInfoType::VEHICLE:
+            static_cast<CPoolsSA*>(pGame->GetPools())->ResetDetachedCarPartsRefModel(static_cast<std::uint16_t>(m_dwModelID));
             delete reinterpret_cast<CVehicleModelInfoSAInterface*>(ppModelInfo[m_dwModelID]);
             break;
         case eModelInfoType::PED:
