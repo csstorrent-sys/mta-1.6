@@ -77,13 +77,20 @@ bool CGUIStaticImage_Impl::LoadFromFile(const char* szFilename)
 
 bool CGUIStaticImage_Impl::LoadFromTexture(CGUITexture* pTexture)
 {
-    if (m_pImageset && m_pImage)
-    {
-        m_pImageset->undefineAllImages();
-    }
+    if (!pTexture)
+        return false;
 
     if (m_pTexture && pTexture != m_pTexture)
     {
+        // Detach all CEGUI references before an owned texture is replaced.
+        reinterpret_cast<CEGUI::StaticImage*>(m_pWindow)->setImage(nullptr);
+        if (m_pImageset)
+        {
+            m_pImagesetManager->destroyImageset(m_pImageset);
+            m_pImageset = nullptr;
+        }
+        m_pImage = nullptr;
+
         if (m_bCreatedTexture)
         {
             delete m_pTexture;
@@ -93,33 +100,38 @@ bool CGUIStaticImage_Impl::LoadFromTexture(CGUITexture* pTexture)
     }
 
     m_pTexture = (CGUITexture_Impl*)pTexture;
-
-    // Get CEGUI texture
     CEGUI::Texture* pCEGUITexture = m_pTexture->GetTexture();
+    if (!pCEGUITexture)
+        return false;
 
-    // Get an unique identifier for CEGUI for the imageset
     char szUnique[CGUI_CHAR_SIZE];
     m_pGUI->GetUniqueName(szUnique);
 
-    // Create an imageset
-    if (!m_pImageset)
+    try
     {
-        while (m_pImagesetManager->isImagesetPresent(szUnique))
-            m_pGUI->GetUniqueName(szUnique);
-        m_pImageset = m_pImagesetManager->createImageset(szUnique, pCEGUITexture, true);
+        if (m_pImageset && m_pImage)
+            m_pImageset->undefineAllImages();
+
+        if (!m_pImageset)
+        {
+            while (m_pImagesetManager->isImagesetPresent(szUnique))
+                m_pGUI->GetUniqueName(szUnique);
+            m_pImageset = m_pImagesetManager->createImageset(szUnique, pCEGUITexture, true);
+        }
+
+        m_pGUI->GetUniqueName(szUnique);
+        m_pImageset->defineImage(szUnique, CEGUI::Point(0, 0), CEGUI::Size(pCEGUITexture->getWidth(), pCEGUITexture->getHeight()), CEGUI::Point(0, 0));
+        m_pImage = &m_pImageset->getImage(szUnique);
+        reinterpret_cast<CEGUI::StaticImage*>(m_pWindow)->setImage(m_pImage);
+    }
+    catch (const CEGUI::Exception& e)
+    {
+        OutputDebugLine(SString("CGUIStaticImage_Impl::LoadFromTexture failed: %s", e.getMessage().c_str()));
+        reinterpret_cast<CEGUI::StaticImage*>(m_pWindow)->setImage(nullptr);
+        m_pImage = nullptr;
+        return false;
     }
 
-    // Get an unique identifier for CEGUI for the image
-    m_pGUI->GetUniqueName(szUnique);
-
-    // Define an image and get its pointer
-    m_pImageset->defineImage(szUnique, CEGUI::Point(0, 0), CEGUI::Size(pCEGUITexture->getWidth(), pCEGUITexture->getHeight()), CEGUI::Point(0, 0));
-    m_pImage = &m_pImageset->getImage(szUnique);
-
-    // Set the image just loaded as the image to be drawn for the widget
-    reinterpret_cast<CEGUI::StaticImage*>(m_pWindow)->setImage(m_pImage);
-
-    // Success
     return true;
 }
 
