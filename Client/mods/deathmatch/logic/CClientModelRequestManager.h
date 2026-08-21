@@ -16,6 +16,7 @@ class CClientModelRequestManager;
 #include "CClientEntity.h"
 #include <list>
 #include <unordered_map>
+#include <unordered_set>
 
 struct SClientModelRequest
 {
@@ -55,4 +56,5 @@ private:
     RequestList                                         m_Requests;
     std::unordered_map<CClientEntity*, RequestIterator> m_RequestByEntity;
     std::list<CClientEntity*>                           m_CancelQueue;
+    std::unordered_set<CClientEntity*>                  m_CancelQueuedEntities;
 };
