@@ -1,0 +1,69 @@
+name: Somnis 1.6 Win32 validation
+
+on:
+  push:
+    branches:
+      - somnis-1.6-backport
+    paths:
+      - 'Client/**'
+      - 'Shared/**'
+      - 'vendor/**'
+      - 'utils/somnis_backport_safe_client_fixes*.py'
+      - '.github/workflows/somnis-build-win32.yml'
+  workflow_dispatch:
+
+jobs:
+  windows-win32-release:
+    name: Release Win32
+    runs-on: windows-2022
+    steps:
+      - name: Checkout Somnis branch
+        uses: actions/checkout@v4
+        with:
+          ref: somnis-1.6-backport
+          fetch-depth: 0
+
+      - uses: actions/cache@v4
+        id: cache-dxfiles
+        with:
+          path: utils/DXFiles
+          key: dxfiles-0001
+
+      - name: Download DirectX
+        if: steps.cache-dxfiles.outputs.cache-hit != 'true'
+        run: Invoke-WebRequest https://mirror-cdn.multitheftauto.com/bdata/DXFiles.zip -OutFile utils/DXFiles.zip
+        shell: powershell
+
+      - name: Extract DirectX
+        if: steps.cache-dxfiles.outputs.cache-hit != 'true'
+        run: Expand-Archive -Path utils/DXFiles.zip -DestinationPath utils/DXFiles
+        shell: powershell
+
+      - name: Restore Visual Studio 2022 compatibility
+        run: |
+          git fetch origin 6ccea706e4b49f6bdb013b554cd8ac5bf4ed8a6c
+          git checkout 6ccea706e4b49f6bdb013b554cd8ac5bf4ed8a6c -- README.md
+          git revert 6ccea706e4b49f6bdb013b554cd8ac5bf4ed8a6c --no-commit
+        shell: bash
+
+      - name: Install CEF
+        run: utils\premake5 install_cef
+
+      - name: Install MTA data files
+        run: utils\premake5 install_data
+
+      - name: Build Release Win32
+        run: win-build.bat release win32
+        shell: cmd
+        env:
+          DXSDK_DIR: './utils/DXFiles/'
+          CI: 'true'
+
+      - name: Compose install files
+        run: utils\premake5 compose_files
+
+      - name: Upload Somnis Win32 build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Somnis-MTA-1.6-Win32
+          path: InstallFiles/
