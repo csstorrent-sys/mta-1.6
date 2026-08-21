@@ -21,8 +21,28 @@ namespace
     //
     // These limits keep the existing async model streamer and API semantics intact; they
     // only spread bursty completion/retry work across consecutive frames.
+    constexpr size_t SOMNIS_MAX_IMMEDIATE_LOADED_REQUESTS_PER_FRAME = 8;
     constexpr size_t SOMNIS_MAX_MODEL_COMPLETIONS_PER_PULSE = 8;
     constexpr size_t SOMNIS_MAX_MODEL_RETRIES_PER_PULSE = 16;
+
+    bool CanActivateLoadedModelImmediately()
+    {
+        static int    s_iLastFrame = -1;
+        static size_t s_uiActivatedThisFrame = 0;
+
+        const int iCurrentFrame = g_pGame ? g_pGame->GetSystemFrameCounter() : 0;
+        if (iCurrentFrame != s_iLastFrame)
+        {
+            s_iLastFrame = iCurrentFrame;
+            s_uiActivatedThisFrame = 0;
+        }
+
+        if (s_uiActivatedThisFrame >= SOMNIS_MAX_IMMEDIATE_LOADED_REQUESTS_PER_FRAME)
+            return false;
+
+        ++s_uiActivatedThisFrame;
+        return true;
+    }
 }
 
 CClientModelRequestManager::CClientModelRequestManager()
@@ -159,12 +179,23 @@ bool CClientModelRequestManager::Request(unsigned short usModelID, CClientEntity
                 // Is it loaded?
                 if (pInfo->IsLoaded())
                 {
-                    // Delete it, remove the it from the list and return true.
-                    delete pEntry;
-                    m_Requests.erase(iter);
+                    if (CanActivateLoadedModelImmediately())
+                    {
+                        // Delete it, remove it from the list and return true.
+                        delete pEntry;
+                        m_Requests.erase(iter);
 
-                    pInfo->MakeCustomModel();
-                    return true;
+                        pInfo->MakeCustomModel();
+                        return true;
+                    }
+
+                    // A large entity packet can reference many models that are already resident.
+                    // Queue the excess instead of creating every native entity on this one frame.
+                    pEntry->pModel = pInfo;
+                    pEntry->requestTimer.SetMaxIncrement(500);
+                    pEntry->requestTimer.Reset();
+                    pInfo->ModelAddRef(NON_BLOCKING, "CClientModelRequestManager::Request deferred loaded");
+                    return false;
                 }
                 else
                 {
@@ -183,15 +214,16 @@ bool CClientModelRequestManager::Request(unsigned short usModelID, CClientEntity
         }
         else
         {
-            // Already loaded? Don't bother adding to the list.
-            if (pInfo->IsLoaded())
+            // Already loaded? Usually return immediately, but during a burst defer excess
+            // native entity creation to the normal model-request callback queue.
+            if (pInfo->IsLoaded() && CanActivateLoadedModelImmediately())
             {
                 pInfo->MakeCustomModel();
-
                 return true;
             }
 
-            // Request it
+            // Hold a reference while the request waits in our queue. This is also used for
+            // already-loaded models that are intentionally being activated progressively.
             pInfo->ModelAddRef(NON_BLOCKING, "CClientModelRequestManager::Request #2");
 
             // Add him to the list over models we're waiting for.
