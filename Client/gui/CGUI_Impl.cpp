@@ -277,7 +277,17 @@ void CGUI_Impl::Draw()
 
 void CGUI_Impl::Invalidate()
 {
-    reinterpret_cast<CEGUI::DirectX9Renderer*>(m_pRenderer)->preD3DReset();
+    try
+    {
+        reinterpret_cast<CEGUI::DirectX9Renderer*>(m_pRenderer)->preD3DReset();
+    }
+    catch (const CEGUI::Exception& exception)
+    {
+        // Do not let a GUI renderer exception unwind through the Direct3D/COM
+        // device-loss path. This commonly runs during Alt+Tab/display resets.
+        MessageBox(0, exception.getMessage().c_str(), "CEGUI Exception", MB_OK | MB_ICONERROR | MB_TOPMOST);
+        TerminateProcess(GetCurrentProcess(), 1);
+    }
 }
 
 void CGUI_Impl::Restore()
