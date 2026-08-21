@@ -5,8 +5,7 @@ on:
     branches:
       - somnis-1.6-backport
     paths:
-      - utils/somnis_backport_safe_client_fixes.py
-      - utils/somnis_backport_safe_client_fixes_2.py
+      - 'utils/somnis_backport_safe_client_fixes*.py'
       - .github/workflows/somnis-apply-safe-backports.yml
   workflow_dispatch:
 
@@ -26,8 +25,11 @@ jobs:
       - name: Apply protocol-neutral client fixes
         shell: pwsh
         run: |
-          python utils/somnis_backport_safe_client_fixes.py
-          python utils/somnis_backport_safe_client_fixes_2.py
+          Get-ChildItem utils/somnis_backport_safe_client_fixes*.py | Sort-Object Name | ForEach-Object {
+            Write-Host "Running $($_.Name)"
+            python $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Commit applied backports
         shell: pwsh
