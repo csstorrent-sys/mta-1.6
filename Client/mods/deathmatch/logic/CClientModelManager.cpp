@@ -35,18 +35,33 @@ void CClientModelManager::RemoveAll(void)
 
 void CClientModelManager::Add(const std::shared_ptr<CClientModel>& pModel)
 {
-    if (m_Models[pModel->GetModelID()] != nullptr)
+    if (!pModel)
+        return;
+
+    const int iModelID = pModel->GetModelID();
+    const int iMaxModelID = g_pGame->GetBaseIDforCOL();
+    if (iModelID < 0 || iModelID >= iMaxModelID)
+        return;
+
+    if (m_Models[iModelID] != nullptr)
     {
-        dassert(m_Models[pModel->GetModelID()].get() == pModel.get());
+        dassert(m_Models[iModelID].get() == pModel.get());
         return;
     }
-    m_Models[pModel->GetModelID()] = pModel;
+    m_Models[iModelID] = pModel;
     m_modelCount++;
 }
 
 bool CClientModelManager::Remove(const std::shared_ptr<CClientModel>& pModel)
 {
-    int modelId = pModel->GetModelID();
+    if (!pModel)
+        return false;
+
+    const int modelId = pModel->GetModelID();
+    const int iMaxModelID = g_pGame->GetBaseIDforCOL();
+    if (modelId < 0 || modelId >= iMaxModelID)
+        return false;
+
     if (m_Models[modelId] != nullptr)
     {
         CResource* parentResource = m_Models[modelId]->GetParentResource();
@@ -76,17 +91,24 @@ int CClientModelManager::GetFirstFreeModelID(void)
 
 int CClientModelManager::GetFreeTxdModelID()
 {
-    std::uint16_t usTxdId = g_pGame->GetPools()->GetTxdPool().GetFreeTextureDictonarySlot();
-    if (usTxdId == -1)
+    const std::uint32_t uiTxdId = g_pGame->GetPools()->GetTxdPool().GetFreeTextureDictonarySlot();
+    if (uiTxdId == static_cast<std::uint32_t>(-1))
         return INVALID_MODEL_ID;
-    return MAX_MODEL_DFF_ID + usTxdId;
+
+    const std::uint32_t uiMaxModelID = g_pGame->GetBaseIDforCOL();
+    if (uiMaxModelID <= MAX_MODEL_DFF_ID || uiTxdId >= uiMaxModelID - MAX_MODEL_DFF_ID)
+        return INVALID_MODEL_ID;
+
+    return MAX_MODEL_DFF_ID + static_cast<int>(uiTxdId);
 }
 
-std::shared_ptr<CClientModel>  CClientModelManager::FindModelByID(int iModelID)
+std::shared_ptr<CClientModel> CClientModelManager::FindModelByID(int iModelID)
 {
-    int32_t iMaxModelId = g_pGame->GetBaseIDforCOL();
+    const int32_t iMaxModelId = g_pGame->GetBaseIDforCOL();
 
-    if (iModelID < iMaxModelId)
+    // Lua-facing cleanup paths can contain stale/invalid IDs after resource restarts.
+    // Always check both bounds before indexing the model array.
+    if (iModelID >= 0 && iModelID < iMaxModelId)
         return m_Models[iModelID];
 
     return nullptr;
@@ -94,6 +116,9 @@ std::shared_ptr<CClientModel>  CClientModelManager::FindModelByID(int iModelID)
 
 std::shared_ptr<CClientModel> CClientModelManager::Request(CClientManager* pManager, int iModelID, eClientModelType eType)
 {
+    if (iModelID < 0 || iModelID >= g_pGame->GetBaseIDforCOL())
+        return nullptr;
+
     std::shared_ptr<CClientModel> pModel = FindModelByID(iModelID);
     if (pModel == nullptr)
     {
