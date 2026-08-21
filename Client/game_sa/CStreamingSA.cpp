@@ -431,53 +431,68 @@ void CStreamingSA::RemoveArchive(unsigned char ucArchiveID)
 
 bool CStreamingSA::SetStreamingBufferSize(uint32 numBlocks)
 {
-    numBlocks += numBlocks % 2; // Make sure number is even by "rounding" it upwards. [Otherwise it can't be split in half properly]
-    
-    // Check if the size is the same already
+    // Round up to an even block count so the buffer can be split in half.
+    numBlocks += numBlocks % 2;
+
     if (numBlocks == ms_streamingHalfOfBufferSizeBlocks * 2)
         return true;
 
     if (ms_pStreamingBuffer[0] == nullptr || ms_pStreamingBuffer[1] == nullptr)
         return false;
 
-    // First of all, allocate the new buffer
-    // NOTE: Due to a bug in the `MallocAlign` code the function will just *crash* instead of returning nullptr on alloc. failure :D
-    typedef void*(__cdecl * Function_CMemoryMgr_MallocAlign)(uint32 uiCount, uint32 uiAlign);
-    void* pNewBuffer = ((Function_CMemoryMgr_MallocAlign)(0x72F4C0))(numBlocks * 2048, 2048);
-    if (!pNewBuffer) // ...so this code is useless for now
+    typedef void*(__cdecl* AllocFunc)(uint32, uint32);
+    typedef void(__cdecl* DeallocFunc)(void*);
+
+    // Allocate first, so a failure leaves the current GTA streaming buffer untouched.
+    void* pNewBuffer = ((AllocFunc)(0x72F4C0))(numBlocks * 2048, 2048);
+    if (!pNewBuffer)
         return false;
 
     int pointer = *(int*)0x8E3FFC;
     SGtaStream(&streaming)[5] = *(SGtaStream(*)[5])(pointer);
 
-    // Wait while streaming thread ends tasks
-    while (streaming[0].bInUse || streaming[1].bInUse);
+    void* const pOldBuffer = ms_pStreamingBuffer[0];
 
-    // Suspend streaming thread [otherwise data might become corrupted]
-    SuspendThread(*phStreamingThread);
+    // IMPORTANT: suspend first and then inspect bInUse. The old check-then-suspend
+    // sequence had a race where the streaming thread could start a request between
+    // those two operations, leaving GTA waiting forever on a suspended worker.
+    constexpr int kMaxRetries = 10000;
+    for (int attempt = 0;; ++attempt)
+    {
+        if (attempt >= kMaxRetries)
+        {
+            ((DeallocFunc)(0x72F4F0))(pNewBuffer);
+            return false;
+        }
 
-    // Calculate new buffer pointers
+        if (SuspendThread(*phStreamingThread) == (DWORD)-1)
+        {
+            Sleep(1);
+            continue;
+        }
+
+        if (!streaming[0].bInUse && !streaming[1].bInUse)
+            break;
+
+        ResumeThread(*phStreamingThread);
+        Sleep(0);
+    }
+
     void* const pNewBuff0 = pNewBuffer;
     void* const pNewBuff1 = (void*)(reinterpret_cast<uintptr_t>(pNewBuffer) + 2048u * (numBlocks / 2));
 
-    // Copy data from old buffer to new buffer
     const auto copySizeBytes = std::min(ms_streamingHalfOfBufferSizeBlocks, numBlocks / 2) * 2048;
     MemCpyFast(pNewBuff0, ms_pStreamingBuffer[0], copySizeBytes);
     MemCpyFast(pNewBuff1, ms_pStreamingBuffer[1], copySizeBytes);
 
-    // Now, we can deallocate the old buffer safely
-    typedef void(__cdecl * Function_CMemoryMgr_FreeAlign)(void* pos);
-    ((Function_CMemoryMgr_FreeAlign)(0x72F4F0))(ms_pStreamingBuffer[0]);
-
-    // Update the buffer size now
     ms_streamingHalfOfBufferSizeBlocks = numBlocks / 2;
-
-    // Update internal pointers too
     streaming[0].pBuffer = ms_pStreamingBuffer[0] = pNewBuff0;
     streaming[1].pBuffer = ms_pStreamingBuffer[1] = pNewBuff1;
 
-    // Now we can resume streaming
+    // Resume the worker before freeing the old allocation. This avoids blocking GTA's
+    // allocator while the streaming worker is suspended.
     ResumeThread(*phStreamingThread);
+    ((DeallocFunc)(0x72F4F0))(pOldBuffer);
 
     return true;
 }
