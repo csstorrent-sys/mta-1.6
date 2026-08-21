@@ -28,6 +28,14 @@ namespace StreamingMemory
     constexpr std::uint32_t kMinBytesToClean = 64U * 1024U;
     constexpr std::uint32_t kMaxReasonableEstimate = 512U * 1024U * 1024U;  // 512 MB
 
+    // Somnis keeps a little free streaming headroom instead of waiting until the
+    // next model/TXD allocation is already touching the limit. This reduces the
+    // repeated load -> purge -> load oscillation that presents as micro-stutter.
+    constexpr std::uint32_t kMinReserveBytes = 8U * 1024U * 1024U;
+    constexpr std::uint32_t kMaxReserveBytes = 24U * 1024U * 1024U;
+    constexpr std::uint32_t kHighWaterPercent = 90U;
+    constexpr std::uint32_t kTargetWaterPercent = 82U;
+
     // Keep this deliberately conservative. MTA/GTA:SA is still a Win32 process, so
     // blindly assigning 512 MB+ to the GTA streaming pool can steal address-space
     // headroom from CEF, Lua, custom textures/models and the D3D driver.
@@ -89,16 +97,6 @@ namespace StreamingMemory
         if (memoryLimitBytes <= 1)
             return;
 
-        std::uint32_t bytesToClean = std::min(estimatedBytes, kMaxReasonableEstimate);
-        if (bytesToClean >= memoryLimitBytes)
-        {
-            const std::uint32_t maxClean = static_cast<std::uint32_t>((static_cast<std::uint64_t>(memoryLimitBytes) * 3) / 4);
-            bytesToClean = std::min(maxClean, memoryLimitBytes - 1);
-        }
-
-        if (bytesToClean == 0)
-            return;
-
         std::uint32_t memoryUsedBytes = 0;
         __try
         {
@@ -108,12 +106,51 @@ namespace StreamingMemory
         {
             return;
         }
-        if (memoryUsedBytes < memoryLimitBytes)
+
+        if (memoryUsedBytes > memoryLimitBytes)
+            memoryUsedBytes = memoryLimitBytes;
+
+        const std::uint32_t freeBytes = memoryLimitBytes - memoryUsedBytes;
+
+        // Reserve scales with the configured pool but stays deliberately small.
+        // 320 MB therefore keeps roughly 20 MB ready for the next burst.
+        const std::uint32_t reserveBytes = std::min(
+            kMaxReserveBytes,
+            std::max(kMinReserveBytes, static_cast<std::uint32_t>(static_cast<std::uint64_t>(memoryLimitBytes) / 16ULL)));
+
+        const std::uint32_t boundedEstimate = std::min(estimatedBytes, kMaxReasonableEstimate);
+        const std::uint64_t desiredFree64 = static_cast<std::uint64_t>(boundedEstimate) + reserveBytes;
+        const std::uint32_t desiredFree = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(desiredFree64, static_cast<std::uint64_t>(memoryLimitBytes - 1)));
+
+        std::uint32_t bytesToClean = 0;
+
+        // Normal path: free enough room for the incoming asset plus a safety reserve.
+        if (freeBytes < desiredFree)
+            bytesToClean = desiredFree - freeBytes;
+
+        // Pressure path: if the pool is already above the high-water mark, ask GTA's
+        // streamer to cool it down towards a lower target. The hysteresis between 90%
+        // and 82% avoids cleaning on every nearby model request.
+        const std::uint64_t highWaterBytes = (static_cast<std::uint64_t>(memoryLimitBytes) * kHighWaterPercent) / 100ULL;
+        if (memoryUsedBytes >= highWaterBytes)
         {
-            const std::uint32_t freeBytes = memoryLimitBytes - memoryUsedBytes;
-            if (freeBytes >= bytesToClean)
-                return;
+            const std::uint64_t targetUsedBytes = (static_cast<std::uint64_t>(memoryLimitBytes) * kTargetWaterPercent) / 100ULL;
+            if (memoryUsedBytes > targetUsedBytes)
+            {
+                const std::uint32_t pressureClean = static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(memoryUsedBytes - targetUsedBytes, std::numeric_limits<std::uint32_t>::max()));
+                bytesToClean = std::max(bytesToClean, pressureClean);
+            }
         }
+
+        if (bytesToClean < kMinBytesToClean)
+            return;
+
+        // Never request a purge anywhere near the whole pool in one shot. Large
+        // aggressive purges cause visible texture/model churn and defeat stable async.
+        const std::uint32_t maxClean = static_cast<std::uint32_t>((static_cast<std::uint64_t>(memoryLimitBytes) * 3ULL) / 4ULL);
+        bytesToClean = std::min(bytesToClean, std::max(kMinBytesToClean, maxClean));
 
         __try
         {
