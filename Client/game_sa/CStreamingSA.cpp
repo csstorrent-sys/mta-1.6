@@ -15,6 +15,7 @@
 #include "CModelInfoSA.h"
 #include "Fileapi.h"
 #include "processthreadsapi.h"
+#include <atomic>
 
 extern CCoreInterface* g_pCore;
 
@@ -26,6 +27,193 @@ void* (&CStreamingSA::ms_pStreamingBuffer)[2] = *(void* (*)[2])0x8E4CAC;
 
 namespace
 {
+    namespace StreamingEventPool
+    {
+        constexpr auto SIZE = 8u;
+        static std::atomic<HANDLE> slots[SIZE] = {};
+
+        inline HANDLE Acquire()
+        {
+            for (auto& slot : slots)
+            {
+                if (auto h = slot.exchange(nullptr))
+                {
+                    ResetEvent(h);
+                    return h;
+                }
+            }
+            return CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        }
+
+        inline void Release(HANDLE h)
+        {
+            if (!h)
+                return;
+
+            for (auto& slot : slots)
+            {
+                HANDLE expected = nullptr;
+                if (slot.compare_exchange_strong(expected, h))
+                    return;
+            }
+            CloseHandle(h);
+        }
+    }
+
+    namespace AsyncStreamingFile
+    {
+        enum class State : int
+        {
+            Running = 0,
+            Completed = 1,
+            Abandoned = 2
+        };
+
+        constexpr DWORD TIMEOUT_MS = 5000;
+
+        struct Params
+        {
+            std::wstring     fileName;
+            DWORD            access = 0;
+            DWORD            shareMode = 0;
+            DWORD            disposition = 0;
+            DWORD            flags = 0;
+            HANDLE           result = INVALID_HANDLE_VALUE;
+            DWORD            error = ERROR_SUCCESS;
+            HANDLE           event = nullptr;
+            std::atomic<int> state{0};
+        };
+
+        constexpr auto POOL_SIZE = 8u;
+        static std::atomic<Params*> pool[POOL_SIZE] = {};
+
+        inline Params* Acquire()
+        {
+            for (auto& slot : pool)
+            {
+                if (auto* p = slot.exchange(nullptr))
+                {
+                    p->state = static_cast<int>(State::Running);
+                    p->result = INVALID_HANDLE_VALUE;
+                    p->error = ERROR_SUCCESS;
+                    p->event = nullptr;
+                    p->fileName.clear();
+                    return p;
+                }
+            }
+            return new (std::nothrow) Params();
+        }
+
+        inline void Release(Params* p)
+        {
+            if (!p)
+                return;
+
+            p->fileName.clear();
+            for (auto& slot : pool)
+            {
+                Params* expected = nullptr;
+                if (slot.compare_exchange_strong(expected, p))
+                    return;
+            }
+            delete p;
+        }
+
+        static DWORD WINAPI PoolCallback(LPVOID arg)
+        {
+            auto* p = static_cast<Params*>(arg);
+            p->result = CreateFileW(p->fileName.c_str(), p->access, p->shareMode, nullptr, p->disposition, p->flags, nullptr);
+            p->error = GetLastError();
+
+            auto expected = static_cast<int>(State::Running);
+            if (p->state.compare_exchange_strong(expected, static_cast<int>(State::Completed)))
+            {
+                SetEvent(p->event);
+            }
+            else
+            {
+                StreamingEventPool::Release(p->event);
+                if (p->result != INVALID_HANDLE_VALUE)
+                    CloseHandle(p->result);
+                Release(p);
+            }
+            return 0;
+        }
+    }
+
+    static HANDLE CreateFileWithTimeoutForStreaming(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, DWORD dwCreationDisposition,
+                                                    DWORD dwFlagsAndAttributes)
+    {
+        using namespace AsyncStreamingFile;
+
+        if (!lpFileName)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return INVALID_HANDLE_VALUE;
+        }
+
+        auto* params = Acquire();
+        if (!params)
+            return INVALID_HANDLE_VALUE;
+
+        try
+        {
+            params->fileName = lpFileName;
+        }
+        catch (...)
+        {
+            Release(params);
+            return INVALID_HANDLE_VALUE;
+        }
+
+        HANDLE event = StreamingEventPool::Acquire();
+        if (!event)
+        {
+            Release(params);
+            return INVALID_HANDLE_VALUE;
+        }
+
+        params->access = dwDesiredAccess;
+        params->shareMode = dwShareMode;
+        params->disposition = dwCreationDisposition;
+        params->flags = dwFlagsAndAttributes;
+        params->event = event;
+
+        if (!QueueUserWorkItem(PoolCallback, params, WT_EXECUTELONGFUNCTION))
+        {
+            StreamingEventPool::Release(event);
+            Release(params);
+            return CreateFileW(lpFileName, dwDesiredAccess, dwShareMode, nullptr, dwCreationDisposition, dwFlagsAndAttributes, nullptr);
+        }
+
+        if (WaitForSingleObject(event, TIMEOUT_MS) == WAIT_OBJECT_0)
+        {
+            StreamingEventPool::Release(event);
+            HANDLE result = params->result;
+            DWORD error = params->error;
+            Release(params);
+            SetLastError(error);
+            return result;
+        }
+
+        AddReportLog(6213, SString("Streaming CreateFile timed out after %ums", TIMEOUT_MS));
+
+        auto expected = static_cast<int>(State::Running);
+        if (params->state.compare_exchange_strong(expected, static_cast<int>(State::Abandoned)))
+        {
+            SetLastError(ERROR_TIMEOUT);
+        }
+        else
+        {
+            StreamingEventPool::Release(event);
+            if (params->result != INVALID_HANDLE_VALUE)
+                CloseHandle(params->result);
+            Release(params);
+            SetLastError(ERROR_TIMEOUT);
+        }
+        return INVALID_HANDLE_VALUE;
+    }
+
     //
     // Used in LoadAllRequestedModels to record state
     //
@@ -400,10 +588,10 @@ unsigned char CStreamingSA::AddArchive(const wchar_t* szFilePath)
     if (ucStreamID == INVALID_STREAM_ID)
         return INVALID_ARCHIVE_ID;
 
-    // Create new stream handler
+    // Create new stream handler with a timeout so a stuck filesystem/AV filter cannot freeze the client forever.
     const auto streamCreateFlags = *(DWORD*)0x8E3FE0;
-    HANDLE     hFile = CreateFileW(szFilePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                               streamCreateFlags | FILE_ATTRIBUTE_READONLY | FILE_FLAG_RANDOM_ACCESS, NULL);
+    HANDLE     hFile = CreateFileWithTimeoutForStreaming(szFilePath, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING,
+                                                         streamCreateFlags | FILE_ATTRIBUTE_READONLY | FILE_FLAG_RANDOM_ACCESS);
 
     if (hFile == INVALID_HANDLE_VALUE)
         return INVALID_ARCHIVE_ID;
