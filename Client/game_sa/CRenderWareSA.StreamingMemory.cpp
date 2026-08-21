@@ -34,7 +34,10 @@ namespace StreamingMemory
     constexpr std::uint32_t kMinReserveBytes = 8U * 1024U * 1024U;
     constexpr std::uint32_t kMaxReserveBytes = 24U * 1024U * 1024U;
     constexpr std::uint32_t kHighWaterPercent = 90U;
+    constexpr std::uint32_t kEmergencyWaterPercent = 97U;
     constexpr std::uint32_t kTargetWaterPercent = 82U;
+    constexpr std::uint32_t kNormalPurgeCooldownMs = 120U;
+    constexpr std::uint32_t kNormalPurgeCapBytes = 32U * 1024U * 1024U;
 
     // Keep this deliberately conservative. MTA/GTA:SA is still a Win32 process, so
     // blindly assigning 512 MB+ to the GTA streaming pool can steal address-space
@@ -147,14 +150,32 @@ namespace StreamingMemory
         if (bytesToClean < kMinBytesToClean)
             return;
 
-        // Never request a purge anywhere near the whole pool in one shot. Large
-        // aggressive purges cause visible texture/model churn and defeat stable async.
+        // Do not hammer MakeSpaceFor dozens of times during one short asset burst.
+        // Normal pressure is smoothed into small, spaced purges. Only an emergency
+        // condition bypasses this cooldown because then preventing OOM is more important
+        // than avoiding a small hitch.
+        const std::uint64_t emergencyWaterBytes = (static_cast<std::uint64_t>(memoryLimitBytes) * kEmergencyWaterPercent) / 100ULL;
+        const bool          bEmergency = memoryUsedBytes >= emergencyWaterBytes || freeBytes < boundedEstimate;
+
+        static std::uint32_t s_uiLastPurgeTick = 0;
+        const std::uint32_t  uiNow = static_cast<std::uint32_t>(GetTickCount());
+        const std::uint32_t  uiSinceLastPurge = uiNow - s_uiLastPurgeTick;
+        if (!bEmergency && s_uiLastPurgeTick != 0 && uiSinceLastPurge < kNormalPurgeCooldownMs)
+            return;
+
+        // Normal cleanup is deliberately chunked. A huge one-shot purge can throw out
+        // many useful TXD/DFF assets and immediately force the async streamer to load them
+        // again. Emergency cleanup retains the larger historical safety cap.
+        if (!bEmergency)
+            bytesToClean = std::min(bytesToClean, kNormalPurgeCapBytes);
+
         const std::uint32_t maxClean = static_cast<std::uint32_t>((static_cast<std::uint64_t>(memoryLimitBytes) * 3ULL) / 4ULL);
         bytesToClean = std::min(bytesToClean, std::max(kMinBytesToClean, maxClean));
 
         __try
         {
             pStreaming->MakeSpaceFor(bytesToClean);
+            s_uiLastPurgeTick = uiNow;
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
