@@ -60,6 +60,20 @@ void CNetworkStats::Draw()
     bool                           bBulletSync = pLocalPlayer && g_pClientGame->GetWeaponTypeUsesBulletSync(pLocalPlayer->GetCurrentWeaponType());
     const SVehExtrapolateSettings& vehExtrapolateSettings = g_pClientGame->GetVehExtrapolateSettings();
 
+    const unsigned int uiPing = g_pNet->GetPing();
+    const float        fCurrentLoss = stats.packetlossLastSecond;
+
+    // Practical quality indicator for testing/support. This deliberately uses only
+    // measurable transport symptoms; it does not try to hide genuine packet loss
+    // behind extra interpolation or pretend that a bad route/Wi-Fi link is healthy.
+    const char* szConnectionHealth = "Excellent";
+    if (uiPing >= 220 || fCurrentLoss >= 8.0f || stats.messagesInResendBuffer >= 40)
+        szConnectionHealth = "Poor";
+    else if (uiPing >= 140 || fCurrentLoss >= 3.0f || stats.messagesInResendBuffer >= 15)
+        szConnectionHealth = "Unstable";
+    else if (uiPing >= 90 || fCurrentLoss >= 1.0f || stats.messagesInResendBuffer >= 5)
+        szConnectionHealth = "Good";
+
     SString strBuffer;
 
     // Select a string to print
@@ -67,6 +81,7 @@ void CNetworkStats::Draw()
     if (!bHoldingCtrl)
     {
         strBuffer = SString(
+            "Somnis connection health: %s\n"
             "Ping: %u ms\n"
             "Messages in send buffer: %u\n"
             "Messages in resend buffer: %u\n"
@@ -86,7 +101,7 @@ void CNetworkStats::Draw()
             "Alternate pulse order: %s\n"
             "Client: %s\n"
             "Server: %s\n",
-            g_pNet->GetPing(), stats.messagesInSendBuffer, stats.messagesInResendBuffer, stats.packetsReceived, stats.packetsSent, stats.packetlossTotal,
+            szConnectionHealth, uiPing, stats.messagesInSendBuffer, stats.messagesInResendBuffer, stats.packetsReceived, stats.packetsSent, stats.packetlossTotal,
             stats.packetlossLastSecond, strBytesRecv.c_str(), strBytesSent.c_str(), strRecvRate.c_str(), strSendRate.c_str(),
             (unsigned int)floor(m_fPacketReceiveRate + 0.5f), (unsigned int)floor(m_fPacketSendRate + 0.5f), stats.isLimitedByCongestionControl ? 1ULL : 0ULL,
             stats.isLimitedByOutgoingBandwidthLimit ? 1ULL : 0ULL, bBulletSync ? "On" : "Off", vehExtrapolateSettings.iScalePercent,
