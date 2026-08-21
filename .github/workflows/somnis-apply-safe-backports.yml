@@ -6,6 +6,7 @@ on:
       - somnis-1.6-backport
     paths:
       - utils/somnis_backport_safe_client_fixes.py
+      - utils/somnis_backport_safe_client_fixes_2.py
       - .github/workflows/somnis-apply-safe-backports.yml
   workflow_dispatch:
 
@@ -24,7 +25,9 @@ jobs:
 
       - name: Apply protocol-neutral client fixes
         shell: pwsh
-        run: python utils/somnis_backport_safe_client_fixes.py
+        run: |
+          python utils/somnis_backport_safe_client_fixes.py
+          python utils/somnis_backport_safe_client_fixes_2.py
 
       - name: Commit applied backports
         shell: pwsh
