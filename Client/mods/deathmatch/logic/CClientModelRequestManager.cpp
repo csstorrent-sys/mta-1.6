@@ -12,6 +12,19 @@
 
 using std::list;
 
+namespace
+{
+    // Somnis: do not let a large batch of models all finish/retry in the same frame.
+    // The original 1.6 loop can activate every ready model at once and can also re-request
+    // every overdue model on the same pulse. On heavily modded RP servers that turns one
+    // frame into a burst of DFF/TXD/model work and native entity creation.
+    //
+    // These limits keep the existing async model streamer and API semantics intact; they
+    // only spread bursty completion/retry work across consecutive frames.
+    constexpr size_t SOMNIS_MAX_MODEL_COMPLETIONS_PER_PULSE = 8;
+    constexpr size_t SOMNIS_MAX_MODEL_RETRIES_PER_PULSE = 16;
+}
+
 CClientModelRequestManager::CClientModelRequestManager()
 {
     m_bDoingPulse = false;
@@ -255,7 +268,11 @@ void CClientModelRequestManager::DoPulse()
         // We are now doing the pulse
         m_bDoingPulse = true;
 
-        // Call the callback for those finished loading and remove them from the list
+        size_t uiCompletedThisPulse = 0;
+        size_t uiRetriedThisPulse = 0;
+
+        // Call callbacks for finished models, but deliberately pace the expensive
+        // MakeCustomModel/native entity creation work over several rendered frames.
         SClientModelRequest*                 pEntry;
         list<SClientModelRequest*>::iterator iter;
         for (iter = m_Requests.begin(); iter != m_Requests.end();)
@@ -279,13 +296,17 @@ void CClientModelRequestManager::DoPulse()
                 // Unreference us from the model (callback should've added a reference!)
                 entryCopy.pModel->RemoveRef();
 
+                ++uiCompletedThisPulse;
+                if (uiCompletedThisPulse >= SOMNIS_MAX_MODEL_COMPLETIONS_PER_PULSE)
+                    break;
+
                 // Restart loop because m_Requests may have been changed
                 iter = m_Requests.begin();
             }
             else
             {
                 // Been more than 2 seconds since we requested it? Request it again.
-                if (pEntry->requestTimer.Get() > 2000)
+                if (pEntry->requestTimer.Get() > 2000 && uiRetriedThisPulse < SOMNIS_MAX_MODEL_RETRIES_PER_PULSE)
                 {
                     // Request it again. Don't add reference, or we screw up the
                     // reference count.
@@ -296,6 +317,7 @@ void CClientModelRequestManager::DoPulse()
 
                     // Remember now as the time we requested it.
                     pEntry->requestTimer.Reset();
+                    ++uiRetriedThisPulse;
                 }
 
                 // Increment iterator
