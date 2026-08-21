@@ -439,6 +439,20 @@ CColModel* CRenderWareSA::ReadCOL(const SString& buffer)
     // Load the col model
     if (header.version[0] == 'C' && header.version[1] == 'O' && header.version[2] == 'L')
     {
+        constexpr DWORD COL_FILE_INFO_SIZE = sizeof(header.version) + sizeof(header.size);
+        constexpr DWORD COL_MODEL_NAME_SIZE = sizeof(header.name);
+        constexpr DWORD GTA_COL2_HEADER_SIZE = 0x4C;
+        constexpr DWORD GTA_COL3_HEADER_SIZE = 0x58;
+
+        const uint64_t totalSize = static_cast<uint64_t>(header.size) + COL_FILE_INFO_SIZE;
+        if (header.size < COL_MODEL_NAME_SIZE || totalSize > buffer.size())
+            return NULL;
+
+        const DWORD dataSize = header.size - COL_MODEL_NAME_SIZE;
+        if ((header.version[3] == '2' && dataSize < GTA_COL2_HEADER_SIZE) ||
+            (header.version[3] == '3' && dataSize < GTA_COL3_HEADER_SIZE))
+            return NULL;
+
         unsigned char* pModelData = (unsigned char*)buffer.data() + sizeof(ColModelFileHeader);
 
         // Create a new CColModel
@@ -450,11 +464,11 @@ CColModel* CRenderWareSA::ReadCOL(const SString& buffer)
         }
         else if (header.version[3] == '2')
         {
-            LoadCollisionModelVer2(pModelData, header.size - 0x18, pColModel->GetInterface(), NULL);
+            LoadCollisionModelVer2(pModelData, dataSize, pColModel->GetInterface(), NULL);
         }
         else if (header.version[3] == '3')
         {
-            LoadCollisionModelVer3(pModelData, header.size - 0x18, pColModel->GetInterface(), NULL);
+            LoadCollisionModelVer3(pModelData, dataSize, pColModel->GetInterface(), NULL);
         }
 
         // Return the collision model

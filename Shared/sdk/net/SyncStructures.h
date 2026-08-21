@@ -1847,7 +1847,10 @@ struct SVehicleSirenSync : public ISyncStructure
                 bitStream.ReadBit(data.m_bDoLOSCheck);
                 bitStream.ReadBit(data.m_bUseRandomiser);
                 bitStream.ReadBit(data.m_bEnableSilent);
-                return true;
+
+                // This ID indexes the client's fixed siren array. Read the whole structure first
+                // so malformed data cannot desynchronise the rest of the packet.
+                return data.m_ucSirenID <= SIREN_ID_MAX;
             }
         }
 
