@@ -80,6 +80,11 @@ namespace
 CClientModelRequestManager::CClientModelRequestManager()
 {
     m_bDoingPulse = false;
+
+    // A busy RP server can enqueue hundreds of model requests while entering a dense
+    // area. Reserve lookup space once so the client does not repeatedly rehash while
+    // the async streamer is already under load.
+    m_RequestByEntity.reserve(256);
 }
 
 CClientModelRequestManager::~CClientModelRequestManager()
@@ -92,6 +97,7 @@ CClientModelRequestManager::~CClientModelRequestManager()
     }
 
     m_Requests.clear();
+    m_RequestByEntity.clear();
 }
 
 bool CClientModelRequestManager::IsLoaded(unsigned short usModelID)
@@ -108,58 +114,39 @@ bool CClientModelRequestManager::IsLoaded(unsigned short usModelID)
 
 bool CClientModelRequestManager::IsRequested(CModelInfo* pModelInfo)
 {
-    // Look through the list
+    // Model-level queries are uncommon compared with requester lookups. Keep this scan
+    // simple while the hot entity path below uses O(1) lookup.
     std::list<SClientModelRequest*>::iterator iter = m_Requests.begin();
     for (; iter != m_Requests.end(); iter++)
     {
-        // Same model as this entry?
         if ((*iter)->pModel == pModelInfo)
         {
             return true;
         }
     }
 
-    // Not in request list
     return false;
 }
 
 bool CClientModelRequestManager::HasRequested(CClientEntity* pRequester)
 {
     assert(pRequester);
-
-    // Look through the list
-    std::list<SClientModelRequest*>::iterator iter = m_Requests.begin();
-    for (; iter != m_Requests.end(); iter++)
-    {
-        // Same requester as we check for? He has requested something.
-        if ((*iter)->pEntity == pRequester)
-        {
-            return true;
-        }
-    }
-
-    // Not requested anything
-    return false;
+    return m_RequestByEntity.find(pRequester) != m_RequestByEntity.end();
 }
 
 CModelInfo* CClientModelRequestManager::GetRequestedModelInfo(CClientEntity* pRequester)
 {
     assert(pRequester);
 
-    // Look through the list
-    std::list<SClientModelRequest*>::iterator iter = m_Requests.begin();
-    for (; iter != m_Requests.end(); iter++)
-    {
-        // Same requester as we check for? He has requested something.
-        if ((*iter)->pEntity == pRequester)
-        {
-            // Return the model info he requested
-            return (*iter)->pModel;
-        }
-    }
+    const auto iterLookup = m_RequestByEntity.find(pRequester);
+    if (iterLookup == m_RequestByEntity.end())
+        return NULL;
 
-    // Not requested anything
-    return NULL;
+    const RequestIterator iterRequest = iterLookup->second;
+    if (iterRequest == m_Requests.end() || !*iterRequest)
+        return NULL;
+
+    return (*iterRequest)->pModel;
 }
 
 bool CClientModelRequestManager::RequestBlocking(unsigned short usModelID, const char* szTag)
@@ -191,7 +178,7 @@ bool CClientModelRequestManager::Request(unsigned short usModelID, CClientEntity
     if (pInfo)
     {
         // Has it already requested something?
-        list<SClientModelRequest*>::iterator iter;
+        RequestIterator iter;
         if (GetRequestEntry(pRequester, iter))
         {
             // Get the entry
@@ -214,6 +201,7 @@ bool CClientModelRequestManager::Request(unsigned short usModelID, CClientEntity
                     if (CanActivateLoadedModelImmediately())
                     {
                         // Delete it, remove it from the list and return true.
+                        RemoveRequestLookup(pRequester);
                         delete pEntry;
                         m_Requests.erase(iter);
 
@@ -266,6 +254,10 @@ bool CClientModelRequestManager::Request(unsigned short usModelID, CClientEntity
             pEntry->requestTimer.Reset();
             m_Requests.push_back(pEntry);
 
+            RequestIterator newIter = m_Requests.end();
+            --newIter;
+            m_RequestByEntity[pRequester] = newIter;
+
             // Return false. Caller needs to wait.
             return false;
         }
@@ -292,34 +284,15 @@ void CClientModelRequestManager::Cancel(CClientEntity* pEntity, bool bAllowQueue
     }
     else
     {
-        // Got any items?
-        if (!m_Requests.empty())
+        RequestIterator iter;
+        if (GetRequestEntry(pEntity, iter))
         {
-            // Anything requested by the given class?
-            SClientModelRequest*                 pEntry;
-            list<SClientModelRequest*>::iterator iter;
-            for (iter = m_Requests.begin(); iter != m_Requests.end();)
-            {
-                pEntry = *iter;
+            SClientModelRequest* pEntry = *iter;
+            pEntry->pModel->RemoveRef();
 
-                // If the requesting entity matches the given entity, delete and NULL it
-                if (pEntry->pEntity == pEntity)
-                {
-                    // Unreference the reference we added to it.
-                    pEntry->pModel->RemoveRef();
-
-                    // Delete the entry
-                    delete *iter;
-
-                    // Remove from the list
-                    iter = m_Requests.erase(iter);
-                }
-                else
-                {
-                    // Increment iterator otherwize
-                    ++iter;
-                }
-            }
+            RemoveRequestLookup(pEntity);
+            delete pEntry;
+            m_Requests.erase(iter);
         }
     }
 }
@@ -339,8 +312,8 @@ void CClientModelRequestManager::DoPulse()
 
         // Call callbacks for finished models, but deliberately pace the expensive
         // MakeCustomModel/native entity creation work over several rendered frames.
-        SClientModelRequest*                 pEntry;
-        list<SClientModelRequest*>::iterator iter;
+        SClientModelRequest* pEntry;
+        RequestIterator      iter;
         for (iter = m_Requests.begin(); iter != m_Requests.end();)
         {
             pEntry = *iter;
@@ -350,6 +323,7 @@ void CClientModelRequestManager::DoPulse()
             {
                 // Copy then remove from the list because the request is complete and we don't want it modified in Request()
                 const SClientModelRequest entryCopy = *pEntry;
+                RemoveRequestLookup(entryCopy.pEntity);
                 delete pEntry;
                 m_Requests.erase(iter);
 
@@ -411,21 +385,18 @@ void CClientModelRequestManager::DoPulse()
     }
 }
 
-bool CClientModelRequestManager::GetRequestEntry(CClientEntity* pRequester, list<SClientModelRequest*>::iterator& iterOut)
+bool CClientModelRequestManager::GetRequestEntry(CClientEntity* pRequester, RequestIterator& iterOut)
 {
-    // Look through the list
-    std::list<SClientModelRequest*>::iterator iter = m_Requests.begin();
-    for (; iter != m_Requests.end(); iter++)
-    {
-        // Same requester as we check for? He has requested something.
-        if ((*iter)->pEntity == pRequester)
-        {
-            // Pass out the iterator entry and return true
-            iterOut = iter;
-            return true;
-        }
-    }
+    const auto iterLookup = m_RequestByEntity.find(pRequester);
+    if (iterLookup == m_RequestByEntity.end())
+        return false;
 
-    // Not requested anything
-    return false;
+    iterOut = iterLookup->second;
+    return iterOut != m_Requests.end();
+}
+
+void CClientModelRequestManager::RemoveRequestLookup(CClientEntity* pRequester)
+{
+    if (pRequester)
+        m_RequestByEntity.erase(pRequester);
 }
