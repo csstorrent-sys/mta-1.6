@@ -1,0 +1,40 @@
+name: Somnis apply safe client backports
+
+on:
+  push:
+    branches:
+      - somnis-1.6-backport
+    paths:
+      - utils/somnis_backport_safe_client_fixes.py
+      - .github/workflows/somnis-apply-safe-backports.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Somnis 1.6 branch
+        uses: actions/checkout@v4
+        with:
+          ref: somnis-1.6-backport
+          fetch-depth: 0
+
+      - name: Apply protocol-neutral client fixes
+        shell: pwsh
+        run: python utils/somnis_backport_safe_client_fixes.py
+
+      - name: Commit applied backports
+        shell: pwsh
+        run: |
+          if (git status --porcelain) {
+            git config user.name "Somnis Backport Bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add Client Shared
+            git commit -m "Somnis 1.6: apply protocol-neutral client crash backports"
+            git push origin HEAD:somnis-1.6-backport
+          } else {
+            Write-Host "No source changes were needed."
+          }
