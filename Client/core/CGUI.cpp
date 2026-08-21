@@ -57,6 +57,17 @@ CLocalGUI::~CLocalGUI()
 
 void CLocalGUI::SetSkin(const char* szName)
 {
+    static bool s_bInSetSkin = false;
+    if (s_bInSetSkin)
+        return;
+
+    struct SetSkinGuard
+    {
+        explicit SetSkinGuard(bool& value) : flag(value) { flag = true; }
+        ~SetSkinGuard() { flag = false; }
+        bool& flag;
+    } guard(s_bInSetSkin);
+
     CVector2D consolePos, consoleSize;
 
     bool guiWasLoaded = m_pMainMenu != NULL;
@@ -112,6 +123,9 @@ void CLocalGUI::SetSkin(const char* szName)
 
 void CLocalGUI::ChangeLocale(const char* szName)
 {
+    if (!m_pConsole)
+        return;
+
     bool guiWasLoaded = m_pMainMenu != NULL;
     assert(guiWasLoaded);
 
@@ -264,7 +278,8 @@ void CLocalGUI::ApplyQueuedLocale()
 
     if (CCore::GetSingleton().GetModManager()->IsLoaded())
     {
-        CCore::GetSingleton().GetConsole()->Printf("Please disconnect before changing language");
+        if (CConsoleInterface* pConsole = CCore::GetSingleton().GetConsole())
+            pConsole->Printf("Please disconnect before changing language");
         if (cvars)
             cvars->Set("locale", m_LastLocaleName);
 
@@ -316,7 +331,8 @@ void CLocalGUI::DoPulse()
                 SetSkin(currentSkinName);
             else
             {
-                CCore::GetSingleton().GetConsole()->Printf("Please disconnect before changing skin");
+                if (CConsoleInterface* pConsole = CCore::GetSingleton().GetConsole())
+                    pConsole->Printf("Please disconnect before changing skin");
                 cvars->Set("current_skin", m_LastSkinName);
             }
         }
@@ -355,6 +371,9 @@ void CLocalGUI::Draw()
     CGame*      pGame = CCore::GetSingleton().GetGame();
     SystemState systemState = pGame->GetSystemState();
     CGUI*       pGUI = CCore::GetSingleton().GetGUI();
+
+    if (!m_pMainMenu || !m_pChat || !m_pDebugView)
+        return;
 
     // Update mainmenu stuff
     m_pMainMenu->Update();
