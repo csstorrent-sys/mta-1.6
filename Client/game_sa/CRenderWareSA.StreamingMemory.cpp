@@ -10,12 +10,14 @@
 #include "StdInc.h"
 #include "CGameSA.h"
 #include "CRenderWareSA.StreamingMemory.h"
+#include <core/CCoreInterface.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <limits>
 
-extern CGameSA* pGame;
+extern CGameSA*        pGame;
+extern CCoreInterface* g_pCore;
 
 #define VAR_CStreaming_memoryAvailableKB 0x08A5A80
 #define VAR_CStreaming_memoryUsed        0x08E4CB4
@@ -26,8 +28,37 @@ namespace StreamingMemory
     constexpr std::uint32_t kMinBytesToClean = 64U * 1024U;
     constexpr std::uint32_t kMaxReasonableEstimate = 512U * 1024U * 1024U;  // 512 MB
 
+    // Keep this deliberately conservative. MTA/GTA:SA is still a Win32 process, so
+    // blindly assigning 512 MB+ to the GTA streaming pool can steal address-space
+    // headroom from CEF, Lua, custom textures/models and the D3D driver.
+    constexpr std::size_t   kSomnisStreamingTargetBytes = 320ULL * 1024ULL * 1024ULL;
+    constexpr std::uint64_t kSomnisMinSystemRamBytes = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+    constexpr std::uint32_t kSomnisMinCalculatedStreamingMB = 256U;
+
+    void EnsureSomnisStreamingMemoryLimit()
+    {
+        if (!g_pCore || g_pCore->IsUsingCustomStreamingMemorySize())
+            return;
+
+        // Cache the physical-RAM decision; querying WMI repeatedly during texture loads
+        // would defeat the purpose of keeping this path lightweight.
+        static const bool s_bEnoughSystemRam = GetWMITotalPhysicalMemory() >= kSomnisMinSystemRamBytes;
+        if (!s_bEnoughSystemRam)
+            return;
+
+        // Reuse MTA's own RAM/VRAM safety calculation as a minimum capability gate.
+        // Low-end systems therefore retain their normal 1.6 streaming limit.
+        if (g_pCore->GetMaxStreamingMemory() < kSomnisMinCalculatedStreamingMB)
+            return;
+
+        if (g_pCore->GetStreamingMemory() < kSomnisStreamingTargetBytes)
+            g_pCore->SetCustomStreamingMemory(kSomnisStreamingTargetBytes);
+    }
+
     void PrepareStreamingMemoryForSize(std::uint32_t estimatedBytes)
     {
+        EnsureSomnisStreamingMemoryLimit();
+
         if (estimatedBytes < kMinBytesToClean)
             return;
 
